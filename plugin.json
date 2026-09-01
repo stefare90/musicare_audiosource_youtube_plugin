@@ -1,0 +1,10 @@
+{
+    "id": "org.musicare.audiosource.youtube",
+    "packageId": "musicare_audiosource_youtube_plugin",
+    "type": "audioSource",
+    "name": "MusicAre YouTube Audio Source",
+    "version": "1.0.0",
+    "author": "MusicAre Team",
+    "description": "High-performance YouTube Music audio streaming source powered by Flask and yt-dlp.",
+    "repository": "https://github.com/your_org/musicare_audiosource_youtube_plugin"
+}

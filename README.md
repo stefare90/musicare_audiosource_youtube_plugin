@@ -92,7 +92,7 @@ Implement the `BaseAudioSourcePlugin` interface defined by `musicare_audiosource
 ```python
 # src/plugin.py
 from typing import List
-from musicare_sdk import BaseAudioSourcePlugin, Track, AudioQuality, AudioStreamResponse
+from musicare_plugin_sdk import BaseAudioSourcePlugin, Track, AudioQuality, AudioStreamResponse
 from .extractor import MyExtractor
 
 class MyAudioSourcePlugin(BaseAudioSourcePlugin):
@@ -116,7 +116,7 @@ Export the standard entry-point factory function:
 
 ```python
 # src/main.py
-from musicare_sdk import BaseAudioSourcePlugin
+from musicare_plugin_sdk import BaseAudioSourcePlugin
 from .plugin import MyAudioSourcePlugin
 
 def get_plugin() -> BaseAudioSourcePlugin:

@@ -1,7 +1,7 @@
 import unittest
 import time
 import urllib.request
-from musicare_sdk import Track, Artist, AudioStreamResponse
+from musicare_plugin_sdk import Track, Artist, AudioStreamResponse
 from src.main import get_plugin
 
 

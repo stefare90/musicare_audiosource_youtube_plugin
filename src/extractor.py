@@ -3,7 +3,7 @@ import time
 from typing import List
 import yt_dlp
 
-from musicare_sdk import (
+from musicare_plugin_sdk import (
     Track,
     AudioQuality,
     AudioStreamResponse,

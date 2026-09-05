@@ -1,5 +1,5 @@
 import unittest
-from musicare_sdk import Track, Artist, CandidateTrack, TrackMatcher
+from musicare_plugin_sdk import Track, Artist, CandidateTrack, TrackMatcher
 from src.main import get_plugin
 
 

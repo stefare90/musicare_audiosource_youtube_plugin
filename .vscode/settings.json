@@ -7,5 +7,13 @@
         "*_test.py"
     ],
     "python.testing.pytestEnabled": false,
-    "python.testing.unittestEnabled": true
+    "python.testing.unittestEnabled": true,
+    "dart.env": {
+        "SERIOUS_PYTHON_SITE_PACKAGES": "/tmp",
+    },
+    "python.analysis.extraPaths": [
+        "./host_app/src",
+        "./host_app",
+        "./youtube_plugin"
+    ]
 }

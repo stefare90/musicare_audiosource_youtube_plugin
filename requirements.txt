@@ -1,2 +1,3 @@
 yt-dlp>=2024.0.0
-flask>=3.0.0
+certifi>=2024.0.0
+git+https://github.com/stefare90/musicare_audiosource_sdk.git#subdirectory=python/plugin_sdk

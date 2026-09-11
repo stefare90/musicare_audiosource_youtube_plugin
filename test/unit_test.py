@@ -1,6 +1,11 @@
+import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+
 from musicare_plugin_sdk import Track, Artist, CandidateTrack, TrackMatcher
-from src.main import get_plugin
+from main import get_plugin
 
 
 class TestYouTubeAudioPluginUnit(unittest.TestCase):

@@ -1,6 +1,7 @@
 import os
 import time
-from typing import List
+import concurrent.futures
+from typing import List, Optional
 import yt_dlp
 
 from musicare_plugin_sdk import (
@@ -27,10 +28,74 @@ class YouTubeExtractor:
     """
 
     @staticmethod
+    def _extract_single(candidate: CandidateTrack, quality: AudioQuality) -> AudioStreamResponse:
+        extract_opts = {
+            "format": "bestaudio/best" if quality != "low" else "worstaudio/worst",
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "nocheckcertificate": True,
+            "extract_flat": "discard_in_playlist",
+            "lazy_playlist": True,
+            "youtube_include_dash_manifest": False,
+            "youtube_include_hls_manifest": False,
+        }
+
+        with yt_dlp.YoutubeDL(extract_opts) as ydl:
+            video_info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={candidate.id}",
+                download=False,
+            )
+            if not video_info:
+                return None
+
+            stream_url = video_info.get("url")
+            if not stream_url:
+                formats = video_info.get("formats", [])
+                audio_formats = [
+                    f for f in formats
+                    if f.get("vcodec") == "none" and f.get("acodec") != "none"
+                ]
+                if audio_formats:
+                    audio_formats.sort(
+                        key=lambda f: f.get("abr") or 0,
+                        reverse=(quality != "low"),
+                    )
+                    stream_url = audio_formats[0].get("url")
+
+            if not stream_url:
+                return None
+
+            bitrate_kbps = video_info.get("abr") or video_info.get("tbr") or 128
+            http_headers = video_info.get("http_headers") or {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                )
+            }
+
+            return AudioStreamResponse(
+                url=stream_url,
+                quality=quality,
+                codec=video_info.get("audio_ext") or "m4a",
+                bitrate=int(bitrate_kbps * 1000),
+                expires_at=int(time.time() * 1000) + (5 * 60 * 60 * 1000),
+                headers=http_headers,
+            )
+
+    @staticmethod
+    def _extract_single_safe(candidate: CandidateTrack, quality: AudioQuality) -> Optional[AudioStreamResponse]:
+        try:
+            return YouTubeExtractor._extract_single(candidate, quality)
+        except Exception:
+            return None
+
+    @staticmethod
     def resolve_stream(
         track: Track,
         quality: AudioQuality,
-        max_sources: int = 3,
+        max_sources: int = 4,
     ) -> List[AudioStreamResponse]:
         artist_names = ", ".join([a.name for a in track.artists])
         query = f"{artist_names} - {track.name}".strip(" -")
@@ -71,66 +136,20 @@ class YouTubeExtractor:
         # 2. Score and rank candidates by adherence to original track
         ranked_candidates = TrackMatcher.rank_candidates(track, candidates)
 
-        # 3. Extract direct stream URLs for top-ranked candidates
-        extract_opts = {
-            "format": "bestaudio/best" if quality != "low" else "worstaudio/worst",
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "nocheckcertificate": True,
-        }
-
+        # 3. Extract direct stream URLs for top-ranked candidates in parallel
         resolved_sources: List[AudioStreamResponse] = []
+        targets = ranked_candidates[:max_sources]
 
-        with yt_dlp.YoutubeDL(extract_opts) as ydl:
-            for candidate in ranked_candidates[:max_sources]:
-                try:
-                    video_info = ydl.extract_info(
-                        f"https://www.youtube.com/watch?v={candidate.id}",
-                        download=False,
-                    )
-                    if not video_info:
-                        continue
-
-                    stream_url = video_info.get("url")
-                    if not stream_url:
-                        formats = video_info.get("formats", [])
-                        audio_formats = [
-                            f for f in formats
-                            if f.get("vcodec") == "none" and f.get("acodec") != "none"
-                        ]
-                        if audio_formats:
-                            audio_formats.sort(
-                                key=lambda f: f.get("abr") or 0,
-                                reverse=(quality != "low"),
-                            )
-                            stream_url = audio_formats[0].get("url")
-
-                    if not stream_url:
-                        continue
-
-                    bitrate_kbps = video_info.get("abr") or video_info.get("tbr") or 128
-                    http_headers = video_info.get("http_headers") or {
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/120.0.0.0 Safari/537.36"
-                        )
-                    }
-
-                    resolved_sources.append(
-                        AudioStreamResponse(
-                            url=stream_url,
-                            quality=quality,
-                            codec=video_info.get("audio_ext") or "m4a",
-                            bitrate=int(bitrate_kbps * 1000),
-                            expires_at=int(time.time() * 1000) + (5 * 60 * 60 * 1000),
-                            headers=http_headers,
-                        )
-                    )
-                except Exception:
-                    # Proceed to next candidate fallback if one fails
-                    continue
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            # map ensures the results are returned in the exact order of the targets list
+            results = executor.map(
+                lambda c: YouTubeExtractor._extract_single_safe(c, quality),
+                targets
+            )
+            
+            for res in results:
+                if res is not None:
+                    resolved_sources.append(res)
 
         if not resolved_sources:
             raise StreamResolutionError(

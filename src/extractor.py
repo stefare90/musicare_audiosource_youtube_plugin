@@ -1,159 +1,127 @@
-import os
-import time
-import concurrent.futures
+import urllib.parse
 from typing import List, Optional
-import yt_dlp
 
+import yt_dlp
 from musicare_plugin_sdk import (
-    Track,
     AudioQuality,
     AudioStreamResponse,
     CandidateTrack,
-    TrackMatcher,
-    StreamResolutionError,
+    Track,
 )
-
-# Ensure SSL root certificates are properly recognized in mobile environments
-try:
-    import certifi
-    os.environ["SSL_CERT_FILE"] = certifi.where()
-    os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
-except ImportError:
-    pass
 
 
 class YouTubeExtractor:
-    """
-    Resolves tracks into direct audio stream URLs using yt-dlp and heuristic ranking.
-    """
-
     @staticmethod
-    def _extract_single(candidate: CandidateTrack, quality: AudioQuality) -> AudioStreamResponse:
-        extract_opts = {
-            "format": "bestaudio/best" if quality != "low" else "worstaudio/worst",
+    def search_candidates(track: Track) -> List[CandidateTrack]:
+        """Fast search (< 0.4s) returning lightweight metadata candidates without extracting formats."""
+        artist_prefix = f"{track.artists[0]} - " if track.artists else ""
+        query = f"ytsearch5:{artist_prefix}{track.name}".strip()
+
+        ydl_opts = {
+            "extract_flat": "in_playlist",
+            "skip_download": True,
             "quiet": True,
             "no_warnings": True,
-            "skip_download": True,
-            "nocheckcertificate": True,
-            "extract_flat": "discard_in_playlist",
-            "lazy_playlist": True,
-            "youtube_include_dash_manifest": False,
-            "youtube_include_hls_manifest": False,
         }
 
-        with yt_dlp.YoutubeDL(extract_opts) as ydl:
-            video_info = ydl.extract_info(
-                f"https://www.youtube.com/watch?v={candidate.id}",
-                download=False,
-            )
-            if not video_info:
-                return None
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False) or {}
+            entries = info.get("entries", [])
 
-            stream_url = video_info.get("url")
-            if not stream_url:
-                formats = video_info.get("formats", [])
-                audio_formats = [
-                    f for f in formats
-                    if f.get("vcodec") == "none" and f.get("acodec") != "none"
-                ]
-                if audio_formats:
-                    audio_formats.sort(
-                        key=lambda f: f.get("abr") or 0,
-                        reverse=(quality != "low"),
+            candidates: List[CandidateTrack] = []
+            for entry in entries:
+                if not entry:
+                    continue
+
+                candidate_id = str(entry.get("id", "")).strip()
+                title = str(entry.get("title", "")).strip()
+                if not candidate_id or not title:
+                    continue
+
+                uploader = entry.get("uploader") or entry.get("channel")
+                duration = entry.get("duration")
+                duration_ms = int(duration * 1000) if duration is not None else None
+
+                candidates.append(
+                    CandidateTrack(
+                        id=candidate_id,
+                        title=title,
+                        artist=uploader,
+                        duration_ms=duration_ms,
                     )
-                    stream_url = audio_formats[0].get("url")
+                )
+
+            return candidates
+
+    @staticmethod
+    def resolve_stream(
+        candidate_id: str, quality: AudioQuality = AudioQuality.HIGH
+    ) -> AudioStreamResponse:
+        """Extract direct audio stream URL on-demand (~0.7s) for a chosen candidate ID."""
+        video_url = f"https://www.youtube.com/watch?v={candidate_id}"
+
+        format_selector = {
+            AudioQuality.LOW: "worstaudio/bestaudio[abr<=96]/best",
+            AudioQuality.MEDIUM: "bestaudio[abr<=128]/bestaudio/best",
+            AudioQuality.HIGH: "bestaudio[ext=m4a]/bestaudio/best",
+        }.get(quality, "bestaudio/best")
+
+        ydl_opts = {
+            "format": format_selector,
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False) or {}
+
+            stream_url = info.get("url")
+            headers = dict(info.get("http_headers", {}))
+            codec = info.get("acodec")
+            abr = info.get("abr")
+            bitrate = int(abr * 1000) if abr else None
+
+            # Fallback to formats array if top-level url is absent
+            if not stream_url and "formats" in info:
+                audio_formats = [
+                    f
+                    for f in info["formats"]
+                    if f.get("url") and f.get("acodec") != "none"
+                ]
+                if not audio_formats:
+                    audio_formats = [f for f in info["formats"] if f.get("url")]
+
+                if audio_formats:
+                    chosen = audio_formats[-1]
+                    stream_url = chosen.get("url")
+                    headers = dict(chosen.get("http_headers", headers))
+                    codec = chosen.get("acodec", codec)
+                    format_abr = chosen.get("abr")
+                    if format_abr:
+                        bitrate = int(format_abr * 1000)
 
             if not stream_url:
-                return None
-
-            bitrate_kbps = video_info.get("abr") or video_info.get("tbr") or 128
-            http_headers = video_info.get("http_headers") or {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
+                raise RuntimeError(
+                    f"Could not resolve playable audio stream for YouTube video ID: {candidate_id}"
                 )
-            }
+
+            # Parse expiration timestamp from CDN query parameters if present
+            expires_at: Optional[int] = None
+            try:
+                parsed_url = urllib.parse.urlparse(stream_url)
+                query_params = urllib.parse.parse_qs(parsed_url.query)
+                if "expire" in query_params:
+                    expires_at = int(query_params["expire"][0]) * 1000
+            except Exception:
+                expires_at = None
 
             return AudioStreamResponse(
                 url=stream_url,
                 quality=quality,
-                codec=video_info.get("audio_ext") or "m4a",
-                bitrate=int(bitrate_kbps * 1000),
-                expires_at=int(time.time() * 1000) + (5 * 60 * 60 * 1000),
-                headers=http_headers,
+                codec=codec,
+                bitrate=bitrate,
+                expires_at=expires_at,
+                headers=headers,
             )
-
-    @staticmethod
-    def _extract_single_safe(candidate: CandidateTrack, quality: AudioQuality) -> Optional[AudioStreamResponse]:
-        try:
-            return YouTubeExtractor._extract_single(candidate, quality)
-        except Exception:
-            return None
-
-    @staticmethod
-    def resolve_stream(
-        track: Track,
-        quality: AudioQuality,
-        max_sources: int = 4,
-    ) -> List[AudioStreamResponse]:
-        artist_names = ", ".join([a.name for a in track.artists])
-        query = f"{artist_names} - {track.name}".strip(" -")
-
-        search_opts = {
-            "format": "bestaudio/best",
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": "in_playlist",
-            "skip_download": True,
-            "nocheckcertificate": True,
-        }
-
-        # 1. Search YouTube for audio candidates
-        with yt_dlp.YoutubeDL(search_opts) as ydl:
-            search_results = ydl.extract_info(f"ytsearch5:{query} audio", download=False)
-            entries = search_results.get("entries", []) if search_results else []
-
-        if not entries:
-            raise StreamResolutionError(f"No audio candidates found on YouTube for query: '{query}'")
-
-        candidates: List[CandidateTrack] = []
-        for entry in entries:
-            if entry and entry.get("id") and entry.get("title"):
-                duration_sec = entry.get("duration") or 0
-                candidates.append(
-                    CandidateTrack(
-                        id=entry["id"],
-                        title=entry.get("title", ""),
-                        artist=entry.get("uploader", "") or entry.get("channel", ""),
-                        duration_ms=int(duration_sec * 1000),
-                    )
-                )
-
-        if not candidates:
-            raise StreamResolutionError(f"Failed to parse candidate metadata for query: '{query}'")
-
-        # 2. Score and rank candidates by adherence to original track
-        ranked_candidates = TrackMatcher.rank_candidates(track, candidates)
-
-        # 3. Extract direct stream URLs for top-ranked candidates in parallel
-        resolved_sources: List[AudioStreamResponse] = []
-        targets = ranked_candidates[:max_sources]
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            # map ensures the results are returned in the exact order of the targets list
-            results = executor.map(
-                lambda c: YouTubeExtractor._extract_single_safe(c, quality),
-                targets
-            )
-            
-            for res in results:
-                if res is not None:
-                    resolved_sources.append(res)
-
-        if not resolved_sources:
-            raise StreamResolutionError(
-                f"Failed to resolve any playable audio stream URL for query: '{query}'"
-            )
-
-        return resolved_sources

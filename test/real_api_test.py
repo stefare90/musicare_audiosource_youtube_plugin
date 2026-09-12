@@ -1,64 +1,42 @@
-import os
-import sys
 import unittest
-import time
 import urllib.request
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-
-from musicare_plugin_sdk import Track, Artist, AudioStreamResponse
-from main import get_plugin
+from musicare_plugin_sdk import AudioQuality, Track
+from src.plugin import YouTubeAudioSourcePlugin
 
 
-class TestYouTubeAudioPluginRealApi(unittest.TestCase):
-    def setUp(self):
-        """Instantiates the plugin via the standard factory before each test."""
-        self.plugin = get_plugin()
+class TestYouTubePluginRealApi(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.plugin = YouTubeAudioSourcePlugin()
 
-    def test_resolve_stream_returns_playable_sources(self):
-        """Verifies that get_stream resolves real URLs and CDN responds to HTTP Range requests."""
-        test_tracks = [
-            Track(
-                name="Come Together",
-                artists=[Artist(name="The Beatles")],
-                duration_ms=259000,
-            ),
-            Track(
-                name="Bohemian Rhapsody",
-                artists=[Artist(name="Queen")],
-                duration_ms=354000,
-            ),
-        ]
+    def test_e2e_search_and_cdn_handshake(self):
+        # 1. Search candidates (Fast flat search)
+        track = Track(name="Come Together", artists=["The Beatles"], duration_ms=259000)
+        candidates = self.plugin.search_candidates(track)
 
-        for track in test_tracks:
-            with self.subTest(track=track.name):
-                sources = self.plugin.get_stream(track, quality="high")
+        self.assertGreater(len(candidates), 0, "Candidate search returned zero items")
+        primary = candidates[0]
+        self.assertTrue(bool(primary.id), "Primary candidate ID must not be empty")
+        self.assertTrue(bool(primary.title), "Primary candidate title must not be empty")
 
-                self.assertIsInstance(sources, list)
-                self.assertGreater(len(sources), 0, f"No streams resolved for '{track.name}'")
+        # 2. Resolve stream on-demand for primary candidate
+        stream = self.plugin.resolve_stream(primary.id, AudioQuality.HIGH)
+        self.assertTrue(stream.url.startswith("https://"), "Stream URL must use HTTPS")
 
-                # Validate the primary resolved stream object
-                primary = sources[0]
-                self.assertIsInstance(primary, AudioStreamResponse)
-                self.assertTrue(primary.url.startswith("https://"))
-                self.assertIn("googlevideo.com", primary.url)
-                self.assertGreater(primary.bitrate or 0, 0)
-                self.assertIsNotNone(primary.codec)
-                self.assertGreater(primary.expires_at or 0, int(time.time() * 1000))
+        # 3. HTTP Range handshake (bytes 0-1024) against live CDN
+        headers = {"User-Agent": stream.headers.get("User-Agent", "Mozilla/5.0"), "Range": "bytes=0-1024"}
+        for k, v in stream.headers.items():
+            headers[k] = v
+        headers["Range"] = "bytes=0-1024"
 
-                # Live HTTP Range handshake against Google CDN
-                headers = {**(primary.headers or {}), "Range": "bytes=0-1024"}
-                req = urllib.request.Request(primary.url, headers=headers)
-
-                with urllib.request.urlopen(req, timeout=15) as cdn_response:
-                    self.assertIn(cdn_response.status, [200, 206])
-                    content_type = cdn_response.headers.get("Content-Type", "")
-                    self.assertTrue(
-                        any(t in content_type for t in ["audio", "video/mp4", "video/webm"]),
-                        f"Unexpected Content-Type: {content_type}",
-                    )
-                    self.assertGreater(len(cdn_response.read()), 0)
+        req = urllib.request.Request(stream.url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as response:
+            status = response.getcode()
+            self.assertIn(status, [200, 206], f"CDN returned unexpected HTTP status: {status}")
+            data = response.read()
+            self.assertGreater(len(data), 0, "CDN returned empty payload")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

@@ -1,57 +1,66 @@
-import os
-import sys
 import unittest
+from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from musicare_plugin_sdk import (
+    AudioQuality,
+    Track,
+)
+from src.plugin import YouTubeAudioSourcePlugin
 
-from musicare_plugin_sdk import Track, Artist, CandidateTrack, TrackMatcher
-from main import get_plugin
 
-
-class TestYouTubeAudioPluginUnit(unittest.TestCase):
+class TestYouTubePluginUnit(unittest.TestCase):
     def setUp(self):
-        """Instantiates the plugin via the standard factory before each test."""
-        self.plugin = get_plugin()
+        self.plugin = YouTubeAudioSourcePlugin()
 
     def test_plugin_metadata(self):
-        """Verifies plugin identity properties and contract adherence."""
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
         self.assertEqual(self.plugin.version, "1.0.0")
 
-    def test_matcher_ranks_candidates_by_adherence(self):
-        """Verifies that TrackMatcher ranks candidates descending by duration and title score."""
-        original = Track(
-            name="Bohemian Rhapsody",
-            artists=[Artist(name="Queen")],
-            duration_ms=354000,
-        )
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_search_candidates_parsing(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {
+            "entries": [
+                {
+                    "id": "fJ9rUzIMcZQ",
+                    "title": "Bohemian Rhapsody (Official Video)",
+                    "uploader": "Queen Official",
+                    "duration": 359,
+                }
+            ]
+        }
 
-        candidates = [
-            CandidateTrack(
-                id="1",
-                title="Bohemian Rhapsody (Live)",
-                artist="Queen",
-                duration_ms=420000,
-            ),
-            CandidateTrack(
-                id="2",
-                title="Bohemian Rhapsody - Metal Cover",
-                artist="Random Band",
-                duration_ms=354000,
-            ),
-            CandidateTrack(
-                id="3",
-                title="Bohemian Rhapsody (Official Audio)",
-                artist="Queen",
-                duration_ms=355000,
-            ),
-        ]
+        track = Track(name="Bohemian Rhapsody", artists=["Queen"], duration_ms=354000)
+        candidates = self.plugin.search_candidates(track)
 
-        ranked = TrackMatcher.rank_candidates(original, candidates)
-        self.assertEqual(len(ranked), 3)
-        self.assertEqual(ranked[0].id, "3")  # Official studio track must be ranked #1
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate.id, "fJ9rUzIMcZQ")
+        self.assertEqual(candidate.title, "Bohemian Rhapsody (Official Video)")
+        self.assertEqual(candidate.artist, "Queen Official")
+        self.assertEqual(candidate.duration_ms, 359000)
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_resolve_stream_parsing(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {
+            "url": "https://rr1---sn.googlevideo.com/videoplayback?expire=1750000000",
+            "acodec": "m4a",
+            "abr": 160,
+            "http_headers": {"User-Agent": "Mozilla/5.0 Test"},
+        }
+
+        stream = self.plugin.resolve_stream("fJ9rUzIMcZQ", AudioQuality.HIGH)
+        self.assertTrue(stream.url.startswith("https://"))
+        self.assertEqual(stream.quality, AudioQuality.HIGH)
+        self.assertEqual(stream.codec, "m4a")
+        self.assertEqual(stream.bitrate, 160000)
+        self.assertEqual(stream.expires_at, 1750000000 * 1000)
+        self.assertEqual(stream.headers.get("User-Agent"), "Mozilla/5.0 Test")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

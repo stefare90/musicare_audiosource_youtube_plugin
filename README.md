@@ -6,6 +6,14 @@ This repository provides a clean, pure-Python development environment to build, 
 
 ---
 
+## ⚡ Two-Tier Just-In-Time (JIT) Resolution Architecture
+
+MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle:
+1. **Phase 1: Candidate Search (`search_candidates`)**: Fast text-based search returning lightweight metadata (`CandidateTrack`: id, title, artist, duration) in **< 0.4s** without extracting or parsing heavy audio formats.
+2. **Phase 2: JIT Stream Resolution (`resolve_stream`)**: Direct on-demand extraction of the playable CDN stream URL (`AudioStreamResponse`) in **~0.7s** executed exclusively for the single selected `candidate_id`.
+
+---
+
 ## ⚠️ Pure-Python Compatibility Rule
 
 To ensure 100% dynamic, Over-The-Air (OTA) execution without triggering mobile OS security violations:
@@ -29,8 +37,8 @@ musicare_audiosource_template/
 │   └── main.py               # Standard entry-point factory: get_plugin()
 ├── test/
 │   ├── __init__.py
-│   ├── unit_test.py          # Fast offline unit and heuristic ranking tests
-│   └── real_api_test.py      # Live E2E tests validating provider APIs and CDN streams
+│   ├── unit_test.py          # Fast offline unit and candidate parsing tests
+│   └── real_api_test.py      # Live E2E tests validating provider search and CDN Range handshake
 ├── .gitignore
 └── README.md
 ```
@@ -87,13 +95,19 @@ Open `plugin.json` and customize your plugin identity:
 ```
 
 ### 2. Implement Plugin Contract (`src/plugin.py` & `src/main.py`)
-Implement the `BaseAudioSourcePlugin` interface defined by `musicare_audiosource_sdk`:
+Implement the `BaseAudioSourcePlugin` interface defined by `musicare_plugin_sdk`, using standard absolute imports (`from src...`):
 
 ```python
 # src/plugin.py
 from typing import List
-from musicare_plugin_sdk import BaseAudioSourcePlugin, Track, AudioQuality, AudioStreamResponse
-from .extractor import MyExtractor
+from musicare_plugin_sdk import (
+    AudioQuality,
+    AudioStreamResponse,
+    BaseAudioSourcePlugin,
+    CandidateTrack,
+    Track,
+)
+from src.extractor import MyExtractor
 
 class MyAudioSourcePlugin(BaseAudioSourcePlugin):
     @property
@@ -108,16 +122,21 @@ class MyAudioSourcePlugin(BaseAudioSourcePlugin):
     def version(self) -> str:
         return "1.0.0"
 
-    def get_stream(self, track: Track, quality: AudioQuality) -> List[AudioStreamResponse]:
-        return MyExtractor.resolve_stream(track, quality)
+    def search_candidates(self, track: Track) -> List[CandidateTrack]:
+        return MyExtractor.search_candidates(track)
+
+    def resolve_stream(
+        self, candidate_id: str, quality: AudioQuality = AudioQuality.HIGH
+    ) -> AudioStreamResponse:
+        return MyExtractor.resolve_stream(candidate_id, quality)
 ```
 
-Export the standard entry-point factory function:
+Export the standard entry-point factory function in `src/main.py`:
 
 ```python
 # src/main.py
 from musicare_plugin_sdk import BaseAudioSourcePlugin
-from .plugin import MyAudioSourcePlugin
+from src.plugin import MyAudioSourcePlugin
 
 def get_plugin() -> BaseAudioSourcePlugin:
     """Standard entry-point factory called dynamically by the host engine."""
@@ -125,20 +144,22 @@ def get_plugin() -> BaseAudioSourcePlugin:
 ```
 
 ### 3. Implement Resolution Logic (`src/extractor.py`)
-Search the upstream service, rank candidates with the SDK's built-in `TrackMatcher`, and return an ordered list of `AudioStreamResponse` instances.
+Implement the two distinct phases in your extractor:
+* **`search_candidates(track: Track)`**: Search the platform using lightweight queries (e.g. `extract_flat=True` in `yt-dlp`), returning an ordered list of `CandidateTrack` instances with IDs, titles, uploaders, and durations.
+* **`resolve_stream(candidate_id: str, quality: AudioQuality)`**: Extract the direct, playable HTTPS stream URL, HTTP headers, codec, bitrate, and expiration timestamp for the given candidate ID.
 
 ---
 
 ## 🧪 Testing & Verification
 
 ### 1. Offline Unit Tests
-Verify metadata compliance and candidate ranking heuristics:
+Verify metadata compliance, parsing, and mocked extraction without network dependencies:
 ```bash
 python -m unittest test/unit_test.py
 ```
 
 ### 2. Real API Tests
-Verify actual stream extraction and HTTP Range CDN connectivity against upstream servers:
+Verify actual upstream candidate search, stream resolution, and HTTP Range (`Range: bytes=0-1024`) CDN connectivity:
 ```bash
 python -m unittest test/real_api_test.py
 ```
@@ -167,9 +188,10 @@ musicare-build
 The tool will:
 1. Validate `plugin.json` syntax and mandatory fields.
 2. Install dependencies into a staging directory.
-3. **Audit compatibility**: fail immediately if native binary extensions (`.so`, `.pyd`, `.dylib`) are detected.
-4. Clean cache and bytecode files.
-5. Generate a portable **`plugin.zip`** in the project root.
+3. **Stage plugin sources**: Preserves the `src/` directory package structure inside `plugin.zip`, ensuring standard `from src...` absolute imports execute identically during local development and in the mobile runtime.
+4. **Audit compatibility**: Fails immediately if native binary extensions (`.so`, `.pyd`, `.dylib`, `.dll`) are detected.
+5. Clean cache and bytecode files (`__pycache__`, `.pyc`).
+6. Generate a portable **`plugin.zip`** in the project root.
 
 ---
 

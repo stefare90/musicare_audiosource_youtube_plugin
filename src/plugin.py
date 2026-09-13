@@ -1,18 +1,16 @@
 from typing import List
+
+from src.extractor import YouTubeExtractor
 from musicare_plugin_sdk import (
-    BaseAudioSourcePlugin,
-    Track,
     AudioQuality,
     AudioStreamResponse,
+    BaseAudioSourcePlugin,
+    CandidateTrack,
+    Track,
 )
-from extractor import YouTubeExtractor
 
 
 class YouTubeAudioSourcePlugin(BaseAudioSourcePlugin):
-    """
-    MusicAre YouTube Audio Source Plugin implementation.
-    """
-
     @property
     def id(self) -> str:
         return "org.musicare.audiosource.youtube"
@@ -25,12 +23,10 @@ class YouTubeAudioSourcePlugin(BaseAudioSourcePlugin):
     def version(self) -> str:
         return "1.0.0"
 
-    def get_stream(
-        self,
-        track: Track,
-        quality: AudioQuality,
-    ) -> List[AudioStreamResponse]:
-        """
-        Resolves track metadata into direct audio stream sources via YouTubeExtractor.
-        """
-        return YouTubeExtractor.resolve_stream(track, quality)
+    def search_candidates(self, track: Track) -> List[CandidateTrack]:
+        return YouTubeExtractor.search_candidates(track)
+
+    def resolve_stream(
+        self, candidate_id: str, quality: AudioQuality = AudioQuality.HIGH
+    ) -> AudioStreamResponse:
+        return YouTubeExtractor.resolve_stream(candidate_id, quality)

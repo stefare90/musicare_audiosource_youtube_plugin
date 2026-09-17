@@ -39,3 +39,10 @@ macos/Flutter/ephemeral/
 Thumbs.db
 *~
 *.swp
+
+
+# pi config files
+.pi
+.pi/*
+AGENTS.md
+PLAN.md

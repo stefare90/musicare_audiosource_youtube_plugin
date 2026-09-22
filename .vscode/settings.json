@@ -9,8 +9,6 @@
     "python.testing.pytestEnabled": false,
     "python.testing.unittestEnabled": true,
     "python.analysis.extraPaths": [
-        "./host_app/src",
-        "./host_app",
-        "./youtube_plugin"
+        "."
     ]
 }

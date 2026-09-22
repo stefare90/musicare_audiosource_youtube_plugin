@@ -2,7 +2,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .Python
-build_temp/
+build_plugin_temp/
 plugin.zip
 *.egg-info/
 dist/
@@ -13,17 +13,7 @@ env/
 ENV/
 .env
 
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.packages
-.pub-cache/
-.pub/
-build/
-
-linux/flutter/ephemeral/
-windows/flutter/ephemeral/
-macos/Flutter/ephemeral/
+# Pure-Python rule: never commit native binaries
 *.so
 *.dylib
 *.dll

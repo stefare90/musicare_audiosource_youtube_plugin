@@ -1,7 +1,7 @@
 import unittest
 import urllib.request
 
-from musicare_plugin_sdk import AudioQuality, Track
+from musicare_audio_plugin_sdk import AudioQuality, Track
 from src.plugin import YouTubeAudioSourcePlugin
 
 

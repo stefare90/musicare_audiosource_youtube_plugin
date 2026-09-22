@@ -2,7 +2,7 @@ import urllib.parse
 from typing import List, Optional
 
 import yt_dlp
-from musicare_plugin_sdk import (
+from musicare_audio_plugin_sdk import (
     AudioQuality,
     AudioStreamResponse,
     CandidateTrack,

@@ -1,7 +1,7 @@
 from typing import List
 
-from src.extractor import YouTubeExtractor
-from musicare_plugin_sdk import (
+from .extractor import YouTubeExtractor
+from musicare_audio_plugin_sdk import (
     AudioQuality,
     AudioStreamResponse,
     BaseAudioSourcePlugin,
@@ -21,7 +21,7 @@ class YouTubeAudioSourcePlugin(BaseAudioSourcePlugin):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     def search_candidates(self, track: Track) -> List[CandidateTrack]:
         return YouTubeExtractor.search_candidates(track)

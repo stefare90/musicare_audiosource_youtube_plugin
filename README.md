@@ -29,9 +29,10 @@ To ensure 100% dynamic, Over-The-Air (OTA) execution without triggering mobile O
 ```text
 musicare_audiosource_template/
 ├── plugin.json               # Manifest metadata and SDK version constraint
-├── requirements.txt          # Runtime dependencies (must be pure-Python)
+├── requirements.txt          # Runtime dependencies, vendored into plugin.zip (must be pure-Python)
+├── requirements-dev.txt      # Dev tooling only (platform SDK + builder), never shipped
 ├── src/
-│   ├── __init__.py           # Package exports
+│   ├── __init__.py           # Package marker (loaded as a regular package by the host)
 │   ├── extractor.py          # Provider-specific search and stream URL extraction
 │   ├── plugin.py             # Implementation of BaseAudioSourcePlugin
 │   └── main.py               # Standard entry-point factory: get_plugin()
@@ -67,8 +68,8 @@ source .venv/bin/activate
 
 # (Optional) On Windows: .venv\Scripts\activate
 
-# Install dependencies and SDK tooling
-pip install -r requirements.txt
+# Install runtime dependencies and development tooling (platform SDK + builder)
+pip install -r requirements-dev.txt
 ```
 
 ---
@@ -95,19 +96,19 @@ Open `plugin.json` and customize your plugin identity:
 ```
 
 ### 2. Implement Plugin Contract (`src/plugin.py` & `src/main.py`)
-Implement the `BaseAudioSourcePlugin` interface defined by `musicare_plugin_sdk`, using standard absolute imports (`from src...`):
+Implement the `BaseAudioSourcePlugin` interface defined by `musicare_audio_plugin_sdk`, using **relative imports** inside `src/` (the host loads `src/` as a per-plugin package, so a top-level `from src...` would collide with other plugins in the same process):
 
 ```python
 # src/plugin.py
 from typing import List
-from musicare_plugin_sdk import (
+from musicare_audio_plugin_sdk import (
     AudioQuality,
     AudioStreamResponse,
     BaseAudioSourcePlugin,
     CandidateTrack,
     Track,
 )
-from src.extractor import MyExtractor
+from .extractor import MyExtractor
 
 class MyAudioSourcePlugin(BaseAudioSourcePlugin):
     @property
@@ -135,8 +136,8 @@ Export the standard entry-point factory function in `src/main.py`:
 
 ```python
 # src/main.py
-from musicare_plugin_sdk import BaseAudioSourcePlugin
-from src.plugin import MyAudioSourcePlugin
+from musicare_audio_plugin_sdk import BaseAudioSourcePlugin
+from .plugin import MyAudioSourcePlugin
 
 def get_plugin() -> BaseAudioSourcePlugin:
     """Standard entry-point factory called dynamically by the host engine."""
@@ -165,15 +166,24 @@ python -m unittest test/real_api_test.py
 ```
 
 ### 3. Interactive CLI Playback
-Resolve and listen to a real audio stream directly through your local player (`mpv`, `ffplay`, or `vlc`) using the SDK CLI:
+Resolve and listen to a real audio stream directly through your local player (`mpv`, `ffplay`, or `vlc`) using the `musicare-audio-play` dev tool:
 ```bash
 # Test default track (The Beatles - Come Together)
-musicare-play
+musicare-audio-play
 
 # Test custom artist and title
-musicare-play "Queen" "Bohemian Rhapsody"
-musicare-play "Pink Floyd" "Comfortably Numb"
+musicare-audio-play "Queen" "Bohemian Rhapsody"
+musicare-audio-play "Pink Floyd" "Comfortably Numb"
 ```
+
+### 4. Platform Harness (End-to-End)
+Certify the packaged `plugin.zip` against the real host runtime (Linux or an Android device).
+Include `http.range` to prove the resolved stream is actually playable:
+```bash
+../musicare_plugin_sdk/dart/harness/test_audio_plugin.sh linux /abs/path/plugin.zip "<query>" \
+  "searchCandidates,stream.resolve,http.range"
+```
+The full procedure is documented in the [platform README](https://github.com/stefare90/musicare_plugin_sdk).
 
 ---
 
@@ -185,17 +195,24 @@ Compile, audit, and package your plugin into a clean distribution archive:
 musicare-build
 ```
 
+`musicare-build` comes from the generic dev tool **`musicare-plugin-builder`** (part of the
+[MusicAre plugin platform](https://github.com/stefare90/musicare_plugin_sdk)), **not** from
+the audio SDK. It is installed through `requirements-dev.txt` and is never vendored into the
+archive.
+
 The tool will:
 1. Validate `plugin.json` syntax and mandatory fields.
-2. Install dependencies into a staging directory.
-3. **Stage plugin sources**: Preserves the `src/` directory package structure inside `plugin.zip`, ensuring standard `from src...` absolute imports execute identically during local development and in the mobile runtime.
+2. Vendor the runtime dependencies from `requirements.txt` into a staging directory (the plugin stays self-contained on device).
+3. **Stage plugin sources**: preserves `src/` inside `plugin.zip`. The host loads `src/` as a per-plugin package, so the code uses **relative imports** (`from .plugin import ...`); the SDK (`musicare_audio_plugin_sdk`) is supplied by the host runtime and is **not** bundled.
 4. **Audit compatibility**: Fails immediately if native binary extensions (`.so`, `.pyd`, `.dylib`, `.dll`) are detected.
 5. Clean cache and bytecode files (`__pycache__`, `.pyc`).
 6. Generate a portable **`plugin.zip`** in the project root.
+
+> Packaging and archive layout are documented in the [platform README](https://github.com/stefare90/musicare_plugin_sdk#packaging).
 
 ---
 
 ## 🚢 Publishing & Distribution
 
-* **GitHub Releases**: Attach `plugin.zip` as a release asset matching the version in `plugin.json` (e.g. `v1.0.0`). The MusicAre host application automatically discovers, downloads, and updates plugins via the GitHub REST API.
+* **GitHub Releases**: Attach `plugin.zip` as a release asset matching the version in `plugin.json` (e.g. tag `1.1.0`). The MusicAre host application automatically discovers, downloads, and updates plugins via the GitHub REST API.
 * **Local Import**: Transfer `plugin.zip` to your device and import it directly into MusicAre via the in-app file picker.

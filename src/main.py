@@ -1,5 +1,5 @@
-from musicare_plugin_sdk import BaseAudioSourcePlugin
-from src.plugin import YouTubeAudioSourcePlugin
+from musicare_audio_plugin_sdk import BaseAudioSourcePlugin
+from .plugin import YouTubeAudioSourcePlugin
 
 
 def get_plugin() -> BaseAudioSourcePlugin:

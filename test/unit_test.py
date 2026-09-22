@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from musicare_plugin_sdk import (
+from musicare_audio_plugin_sdk import (
     AudioQuality,
     Track,
 )
@@ -15,7 +15,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.0.0")
+        self.assertEqual(self.plugin.version, "1.1.0")
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_candidates_parsing(self, mock_ydl_cls):

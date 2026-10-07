@@ -15,7 +15,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.2.0")
+        self.assertEqual(self.plugin.version, "1.2.1")
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_candidates_parsing(self, mock_ydl_cls):
@@ -67,7 +67,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
         mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
 
         def fake_extract(query, download=False):
-            if query == "ytsearch5:Marracash 22simba - Fanculo":
+            if query == "ytsearch5:Fanculo - Marracash 22simba":
                 return {
                     "entries": [
                         {
@@ -87,7 +87,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
 
         self.assertIn("Odvboh6aOWY", [c.id for c in candidates])
         issued = [c.args[0] for c in mock_ydl.extract_info.call_args_list]
-        self.assertEqual(issued, ["ytsearch5:Marracash 22simba - Fanculo"])
+        self.assertEqual(issued, ["ytsearch5:Fanculo - Marracash 22simba"])
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_splits_packed_artist_credit_as_fallback(self, mock_ydl_cls):
@@ -95,7 +95,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
         mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
 
         def fake_extract(query, download=False):
-            if query == "ytsearch5:22simba Marracash - Fanculo":
+            if query == "ytsearch5:Fanculo - 22simba Marracash":
                 return {
                     "entries": [
                         {
@@ -117,7 +117,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
             issued = [c.args[0] for c in mock_ydl.extract_info.call_args_list]
             self.assertEqual(
                 issued,
-                [f"ytsearch5:{artist} - Fanculo", "ytsearch5:22simba Marracash - Fanculo"],
+                [f"ytsearch5:Fanculo - {artist}", "ytsearch5:Fanculo - 22simba Marracash"],
             )
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
@@ -140,7 +140,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         mock_ydl.extract_info.assert_called_once_with(
-            "ytsearch5:Queen - Bohemian Rhapsody", download=False
+            "ytsearch5:Bohemian Rhapsody - Queen", download=False
         )
 
     @patch("src.extractor.yt_dlp.YoutubeDL")

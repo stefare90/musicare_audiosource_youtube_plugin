@@ -34,9 +34,9 @@ class YouTubeExtractor:
         # runs only when the raw form returns nothing. At most 2 queries.
         artists = [a.strip() for a in (track.artists or []) if a and a.strip()]
         title = track.name.strip()
-        raw = f"ytsearch5:{' '.join(artists)} - {title}" if artists else f"ytsearch5:{title}"
+        raw = f"ytsearch5:{title} - {' '.join(artists)}" if artists else f"ytsearch5:{title}"
         terms = YouTubeExtractor._artist_terms(track)
-        smart = f"ytsearch5:{' '.join(terms)} - {title}" if terms else f"ytsearch5:{title}"
+        smart = f"ytsearch5:{title} - {' '.join(terms)}" if terms else f"ytsearch5:{title}"
         return list(dict.fromkeys([raw, smart]))
 
     @staticmethod

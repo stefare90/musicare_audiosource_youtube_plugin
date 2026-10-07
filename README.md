@@ -17,7 +17,7 @@ MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle
 `search_candidates` issues **at most 2** queries (`ytsearch5:`, first 5 hits)
 and stops at the first one returning results:
 
-1. **Raw join** of the provider artist list plus title: `ytsearch5:Marracash 22simba - Fanculo` (one request in the common case).
+1. **Raw join** of the title plus the provider artist list: `ytsearch5:Fanculo - Marracash 22simba` (one request in the common case).
 2. **Smart split** (fallback, only if the raw form is empty): one entry packing
    several names (`"22simba feat. Marracash"`, `"A & B"`, `"A, B"`) is split
    and rejoined with spaces — the same bag of words YouTube tokenizes anyway.

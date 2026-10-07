@@ -12,6 +12,22 @@ MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle
 1. **Phase 1: Candidate Search (`search_candidates`)**: Fast text-based search returning lightweight metadata (`CandidateTrack`: id, title, artist, duration) in **< 0.4s** without extracting or parsing heavy audio formats.
 2. **Phase 2: JIT Stream Resolution (`resolve_stream`)**: Direct on-demand extraction of the playable CDN stream URL (`AudioStreamResponse`) in **~0.7s** executed exclusively for the single selected `candidate_id`.
 
+## 🔎 Search query construction
+
+`search_candidates` issues **at most 2** queries (`ytsearch5:`, first 5 hits)
+and stops at the first one returning results:
+
+1. **Raw join** of the provider artist list plus title: `ytsearch5:Marracash 22simba - Fanculo` (one request in the common case).
+2. **Smart split** (fallback, only if the raw form is empty): one entry packing
+   several names (`"22simba feat. Marracash"`, `"A & B"`, `"A, B"`) is split
+   and rejoined with spaces — the same bag of words YouTube tokenizes anyway.
+
+Single clean artists collapse to one query (both forms coincide), exactly as
+before. Rationale: the metadata provider may list the featured artist first
+while YouTube indexes the track under the primary artist — `Marracash -
+Fanculo` returns zero entries while the joint form finds the official video
+(`Odvboh6aOWY`, "22simba - Fanculo feat. Marracash") on top.
+
 ---
 
 ## ⚠️ Pure-Python Compatibility Rule

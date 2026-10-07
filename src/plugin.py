@@ -21,7 +21,7 @@ class YouTubeAudioSourcePlugin(BaseAudioSourcePlugin):
 
     @property
     def version(self) -> str:
-        return "1.1.0"
+        return "1.2.0"
 
     def search_candidates(self, track: Track) -> List[CandidateTrack]:
         return YouTubeExtractor.search_candidates(track)

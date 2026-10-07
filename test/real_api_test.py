@@ -11,7 +11,6 @@ class TestYouTubePluginRealApi(unittest.TestCase):
         cls.plugin = YouTubeAudioSourcePlugin()
 
     def test_e2e_search_and_cdn_handshake(self):
-        # 1. Search candidates (Fast flat search)
         track = Track(name="Come Together", artists=["The Beatles"], duration_ms=259000)
         candidates = self.plugin.search_candidates(track)
 
@@ -20,11 +19,9 @@ class TestYouTubePluginRealApi(unittest.TestCase):
         self.assertTrue(bool(primary.id), "Primary candidate ID must not be empty")
         self.assertTrue(bool(primary.title), "Primary candidate title must not be empty")
 
-        # 2. Resolve stream on-demand for primary candidate
         stream = self.plugin.resolve_stream(primary.id, AudioQuality.HIGH)
         self.assertTrue(stream.url.startswith("https://"), "Stream URL must use HTTPS")
 
-        # 3. HTTP Range handshake (bytes 0-1024) against live CDN
         headers = {"User-Agent": stream.headers.get("User-Agent", "Mozilla/5.0"), "Range": "bytes=0-1024"}
         for k, v in stream.headers.items():
             headers[k] = v

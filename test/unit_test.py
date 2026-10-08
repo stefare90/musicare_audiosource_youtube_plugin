@@ -4,7 +4,9 @@ from unittest.mock import MagicMock, patch
 from musicare_audio_plugin_sdk import (
     AudioQuality,
     Track,
+    code_of,
 )
+from yt_dlp.utils import DownloadError
 from src.plugin import YouTubeAudioSourcePlugin
 
 
@@ -15,7 +17,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.2.1")
+        self.assertEqual(self.plugin.version, "1.2.2")
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_candidates_parsing(self, mock_ydl_cls):
@@ -153,6 +155,126 @@ class TestYouTubePluginUnit(unittest.TestCase):
         self.assertEqual(self.plugin.search_candidates(track), [])
         mock_ydl.extract_info.assert_called_once_with(
             "ytsearch5:Fanculo", download=False
+        )
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_resolve_retries_with_mobile_clients_on_bot_wall(self, mock_ydl_cls):
+        seen_opts = []
+
+        def factory(opts):
+            seen_opts.append(opts)
+            mock_ydl = MagicMock()
+            mock_ydl.__enter__.return_value = mock_ydl
+            if len(seen_opts) == 1:
+                mock_ydl.extract_info.side_effect = DownloadError(
+                    "ERROR: [youtube] Odvboh6aOWY: Sign in to confirm "
+                    "you're not a bot. Use --cookies-from-browser"
+                )
+            else:
+                mock_ydl.extract_info.return_value = {
+                    "url": "https://rr1---sn.googlevideo.com/videoplayback?expire=1750000000",
+                    "acodec": "mp4a.40.2",
+                    "abr": 129,
+                    "http_headers": {},
+                }
+            return mock_ydl
+
+        mock_ydl_cls.side_effect = factory
+
+        stream = self.plugin.resolve_stream("Odvboh6aOWY", AudioQuality.HIGH)
+
+        self.assertTrue(stream.url.startswith("https://"))
+        self.assertEqual(mock_ydl_cls.call_count, 2)
+        self.assertNotIn("extractor_args", seen_opts[0])
+        self.assertEqual(
+            seen_opts[1]["extractor_args"],
+            {"youtube": {"player_client": ["android", "ios"]}},
+        )
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_resolve_bot_wall_on_both_attempts_is_retryable(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = DownloadError(
+            "ERROR: [youtube] Odvboh6aOWY: Sign in to confirm you're not a bot. "
+            "Use --cookies-from-browser. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ "
+            "for how to manually pass cookies"
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            self.plugin.resolve_stream("Odvboh6aOWY", AudioQuality.HIGH)
+
+        self.assertEqual(code_of(ctx.exception), "rate_limited")
+        self.assertTrue(ctx.exception.retryable)
+        self.assertIn("not a bot", str(ctx.exception))
+        self.assertIn("mobile clients", str(ctx.exception))
+        self.assertNotIn("http", str(ctx.exception))
+        self.assertEqual(mock_ydl_cls.call_count, 2)
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_resolve_persistent_age_gate_is_not_found(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = DownloadError(
+            "ERROR: [youtube] Odvboh6aOWY: Sign in to confirm your age"
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            self.plugin.resolve_stream("Odvboh6aOWY", AudioQuality.HIGH)
+
+        self.assertEqual(code_of(ctx.exception), "not_found")
+        self.assertIn("confirm your age", str(ctx.exception))
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_resolve_transport_error_skips_mobile_retry(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = DownloadError(
+            "ERROR: [youtube] Odvboh6aOWY: Unable to download API page: "
+            "HTTPSConnectionPool Read timed out"
+        )
+
+        with self.assertRaises(Exception) as ctx:
+            self.plugin.resolve_stream("Odvboh6aOWY", AudioQuality.HIGH)
+
+        self.assertEqual(code_of(ctx.exception), "transport_error")
+        self.assertEqual(mock_ydl_cls.call_count, 1)
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_search_retries_with_mobile_clients_on_bot_wall(self, mock_ydl_cls):
+        seen_opts = []
+
+        def factory(opts):
+            seen_opts.append(opts)
+            mock_ydl = MagicMock()
+            mock_ydl.__enter__.return_value = mock_ydl
+            if len(seen_opts) == 1:
+                mock_ydl.extract_info.side_effect = DownloadError(
+                    "ERROR: [youtube:search] Sign in to confirm you're not a bot"
+                )
+            else:
+                mock_ydl.extract_info.return_value = {
+                    "entries": [
+                        {
+                            "id": "Odvboh6aOWY",
+                            "title": "22simba - Fanculo feat. Marracash",
+                            "uploader": "22simba",
+                            "duration": 172,
+                        }
+                    ]
+                }
+            return mock_ydl
+
+        mock_ydl_cls.side_effect = factory
+
+        candidates = self.plugin.search_candidates(
+            Track(name="Fanculo", artists=["22simba feat. Marracash"])
+        )
+
+        self.assertIn("Odvboh6aOWY", [c.id for c in candidates])
+        self.assertEqual(mock_ydl_cls.call_count, 2)
+        self.assertEqual(
+            seen_opts[1]["extractor_args"],
+            {"youtube": {"player_client": ["android", "ios"]}},
         )
 
 

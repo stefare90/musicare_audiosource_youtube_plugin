@@ -7,8 +7,11 @@ from musicare_audio_plugin_sdk import (
     AudioQuality,
     AudioStreamResponse,
     CandidateTrack,
+    InternalError,
     Track,
 )
+
+from .errors import classify_download_error, is_client_wall
 
 
 class YouTubeExtractor:
@@ -38,6 +41,34 @@ class YouTubeExtractor:
         terms = YouTubeExtractor._artist_terms(track)
         smart = f"ytsearch5:{title} - {' '.join(terms)}" if terms else f"ytsearch5:{title}"
         return list(dict.fromkeys([raw, smart]))
+
+    # Mobile API clients for the fallback attempt: a different endpoint that
+    # dodges the web-client bot-check, and for which yt-dlp auto-appends the
+    # web_embedded variants that work around the age-gate without login.
+    _MOBILE_FALLBACK_ARGS = {"youtube": {"player_client": ["android", "ios"]}}
+
+    @staticmethod
+    def _with_client_fallback(base_opts: dict, call):
+        # First attempt with the default clients (full quality); on a
+        # client wall (bot-check/age-gate) retry once with the mobile
+        # clients instead of failing outright. Anything else is classified
+        # immediately: no point retrying a timeout with another client.
+        try:
+            with yt_dlp.YoutubeDL(base_opts) as ydl:
+                return call(ydl)
+        except yt_dlp.utils.DownloadError as first:
+            if not is_client_wall(first):
+                raise classify_download_error(first) from first
+            fallback_opts = dict(base_opts)
+            fallback_opts["extractor_args"] = {
+                **base_opts.get("extractor_args", {}),
+                **YouTubeExtractor._MOBILE_FALLBACK_ARGS,
+            }
+            try:
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    return call(ydl)
+            except yt_dlp.utils.DownloadError as second:
+                raise classify_download_error(second, fallback_of=first) from second
 
     @staticmethod
     def _search_once(ydl: yt_dlp.YoutubeDL, query: str) -> List[CandidateTrack]:
@@ -79,12 +110,14 @@ class YouTubeExtractor:
             "no_warnings": True,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        def run(ydl: yt_dlp.YoutubeDL) -> List[CandidateTrack]:
             for query in YouTubeExtractor._build_search_queries(track):
                 candidates = YouTubeExtractor._search_once(ydl, query)
                 if candidates:
                     return candidates
             return []
+
+        return YouTubeExtractor._with_client_fallback(ydl_opts, run)
 
     @staticmethod
     def resolve_stream(
@@ -107,54 +140,56 @@ class YouTubeExtractor:
             "noplaylist": True,
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=False) or {}
+        def fetch(ydl: yt_dlp.YoutubeDL) -> dict:
+            return ydl.extract_info(video_url, download=False) or {}
 
-            stream_url = info.get("url")
-            headers = dict(info.get("http_headers", {}))
-            codec = info.get("acodec")
-            abr = info.get("abr")
-            bitrate = int(abr * 1000) if abr else None
+        info = YouTubeExtractor._with_client_fallback(ydl_opts, fetch)
 
-            # Fallback to formats array if top-level url is absent
-            if not stream_url and "formats" in info:
-                audio_formats = [
-                    f
-                    for f in info["formats"]
-                    if f.get("url") and f.get("acodec") != "none"
-                ]
-                if not audio_formats:
-                    audio_formats = [f for f in info["formats"] if f.get("url")]
+        stream_url = info.get("url")
+        headers = dict(info.get("http_headers", {}))
+        codec = info.get("acodec")
+        abr = info.get("abr")
+        bitrate = int(abr * 1000) if abr else None
 
-                if audio_formats:
-                    chosen = audio_formats[-1]
-                    stream_url = chosen.get("url")
-                    headers = dict(chosen.get("http_headers", headers))
-                    codec = chosen.get("acodec", codec)
-                    format_abr = chosen.get("abr")
-                    if format_abr:
-                        bitrate = int(format_abr * 1000)
+        # Fallback to formats array if top-level url is absent
+        if not stream_url and "formats" in info:
+            audio_formats = [
+                f
+                for f in info["formats"]
+                if f.get("url") and f.get("acodec") != "none"
+            ]
+            if not audio_formats:
+                audio_formats = [f for f in info["formats"] if f.get("url")]
 
-            if not stream_url:
-                raise RuntimeError(
-                    f"Could not resolve playable audio stream for YouTube video ID: {candidate_id}"
-                )
+            if audio_formats:
+                chosen = audio_formats[-1]
+                stream_url = chosen.get("url")
+                headers = dict(chosen.get("http_headers", headers))
+                codec = chosen.get("acodec", codec)
+                format_abr = chosen.get("abr")
+                if format_abr:
+                    bitrate = int(format_abr * 1000)
 
-            # Parse expiration timestamp from CDN query parameters if present
-            expires_at: Optional[int] = None
-            try:
-                parsed_url = urllib.parse.urlparse(stream_url)
-                query_params = urllib.parse.parse_qs(parsed_url.query)
-                if "expire" in query_params:
-                    expires_at = int(query_params["expire"][0]) * 1000
-            except Exception:
-                expires_at = None
-
-            return AudioStreamResponse(
-                url=stream_url,
-                quality=quality,
-                codec=codec,
-                bitrate=bitrate,
-                expires_at=expires_at,
-                headers=headers,
+        if not stream_url:
+            raise InternalError(
+                f"Could not resolve playable audio stream for YouTube video ID: {candidate_id}"
             )
+
+        # Parse expiration timestamp from CDN query parameters if present
+        expires_at: Optional[int] = None
+        try:
+            parsed_url = urllib.parse.urlparse(stream_url)
+            query_params = urllib.parse.parse_qs(parsed_url.query)
+            if "expire" in query_params:
+                expires_at = int(query_params["expire"][0]) * 1000
+        except Exception:
+            expires_at = None
+
+        return AudioStreamResponse(
+            url=stream_url,
+            quality=quality,
+            codec=codec,
+            bitrate=bitrate,
+            expires_at=expires_at,
+            headers=headers,
+        )

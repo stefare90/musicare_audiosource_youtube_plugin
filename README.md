@@ -28,6 +28,24 @@ while YouTube indexes the track under the primary artist — `Marracash -
 Fanculo` returns zero entries while the joint form finds the official video
 (`Odvboh6aOWY`, "22simba - Fanculo feat. Marracash") on top.
 
+## 🛡️ Player-client fallback (bot-check / age-gate)
+
+On devices without a JavaScript runtime yt-dlp restricts itself to the single
+`visionos` client, so a walled response (bot-check, age-gate) fails outright.
+Both `search_candidates` and `resolve_stream` therefore retry once with the
+mobile API clients (`player_client=[android, ios]`): a different endpoint
+that dodges the web bot-check, and for which yt-dlp auto-appends the
+`web_embedded` variants that work around the age-gate without login. The
+first attempt is unchanged (full quality, one request); the retry costs one
+extra request only when the wall is hit.
+
+If the mobile clients are walled too, the failure is classified into the SDK
+vocabulary (`src/errors.py`) keeping the original yt-dlp text in the message:
+bot-check → `RateLimitedError` (retryable: an IP/network condition, not a
+property of the candidate), persistent age-gate → `NotFoundError`, HTTP 429 →
+`RateLimitedError`, timeouts/connection → `TransportError`, anything else →
+`InternalError`. No cookies are ever used: everything stays inside the plugin.
+
 ---
 
 ## ⚠️ Pure-Python Compatibility Rule

@@ -1,4 +1,6 @@
+import math
 import re
+import unicodedata
 import urllib.parse
 from typing import List, Optional
 
@@ -35,12 +37,79 @@ class YouTubeExtractor:
     def _build_search_queries(track: Track) -> List[str]:
         # Raw join first (one request in the common case); the smart split
         # runs only when the raw form returns nothing. At most 2 queries.
+        # 15 hits cost the same as 5 (measured): depth for the same-song
+        # filter below, which needs more than the top-5 to work with.
         artists = [a.strip() for a in (track.artists or []) if a and a.strip()]
         title = track.name.strip()
-        raw = f"ytsearch5:{title} - {' '.join(artists)}" if artists else f"ytsearch5:{title}"
+        raw = f"ytsearch15:{title} - {' '.join(artists)}" if artists else f"ytsearch15:{title}"
         terms = YouTubeExtractor._artist_terms(track)
-        smart = f"ytsearch5:{title} - {' '.join(terms)}" if terms else f"ytsearch5:{title}"
+        smart = f"ytsearch15:{title} - {' '.join(terms)}" if terms else f"ytsearch15:{title}"
         return list(dict.fromkeys([raw, smart]))
+
+    # YouTube channel naming conventions (not words with meaning): stripped
+    # from the uploader name before the official-channel check below.
+    _CHANNEL_SUFFIXES = frozenset({"official", "vevo", "topic", "music"})
+
+    # Same-song gates: title token recall anyone must clear, and the
+    # duration veto for third-party uploads only (unknown on either side
+    # is neutral). Official-channel uploads are exempt from the veto: on
+    # the artist's own channel an odd duration is an artistic choice
+    # (short film, video edit), on a third-party channel it is junk signal.
+    _TITLE_RECALL_MIN = 0.5
+    _DURATION_TOLERANCE_S = 15
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        folded = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
+        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", folded.lower())).strip()
+
+    @staticmethod
+    def _title_recall(candidate_title: str, track_title: str) -> float:
+        wanted = YouTubeExtractor._normalize(track_title).split()
+        if not wanted:
+            return 0.0
+        present = set(YouTubeExtractor._normalize(candidate_title).split())
+        return sum(1 for token in wanted if token in present) / len(wanted)
+
+    @staticmethod
+    def _artist_present(candidate_title: str, uploader: str, artists: List[str]) -> bool:
+        pool = set(
+            YouTubeExtractor._normalize(candidate_title).split()
+            + YouTubeExtractor._normalize(uploader).split()
+        )
+        for artist in artists or []:
+            for token in YouTubeExtractor._normalize(artist).split():
+                if len(token) >= 2 and token in pool:
+                    return True
+        return False
+
+    @staticmethod
+    def _is_official_channel(uploader: str, artists: List[str]) -> bool:
+        channel = YouTubeExtractor._normalize(uploader).split()
+        names = set()
+        for artist in artists or []:
+            names.update(YouTubeExtractor._normalize(artist).split())
+        # A suffix is stripped only when it is not part of the artist name
+        # itself (e.g. DJ Topic keeps his "topic"); never strip to empty.
+        kept = [
+            token
+            for token in channel
+            if token not in YouTubeExtractor._CHANNEL_SUFFIXES or token in names
+        ] or channel
+        uploader_set, artist_set = set(kept), names
+        if not uploader_set or not artist_set:
+            return False
+        contains = uploader_set <= artist_set or artist_set <= uploader_set
+        return contains and len(uploader_set) <= len(artist_set) + 1
+
+    @staticmethod
+    def _coherence_score(recall: float, duration_s, track_duration_s, views) -> float:
+        if duration_s and track_duration_s:
+            proximity = max(0.0, 1 - abs(duration_s - track_duration_s) / 300)
+        else:
+            proximity = 1.0
+        popularity = min(1.0, math.log10(1 + views) / 7) if views else 0.0
+        return recall + 0.15 * proximity + 0.05 * popularity
 
     # Mobile API clients for the fallback attempt: a different endpoint that
     # dodges the web-client bot-check, and for which yt-dlp auto-appends the
@@ -71,12 +140,18 @@ class YouTubeExtractor:
                 raise classify_download_error(second, fallback_of=first) from second
 
     @staticmethod
-    def _search_once(ydl: yt_dlp.YoutubeDL, query: str) -> List[CandidateTrack]:
+    def _search_once(ydl: yt_dlp.YoutubeDL, query: str, track: Track) -> List[CandidateTrack]:
         info = ydl.extract_info(query, download=False) or {}
         entries = info.get("entries") or []
+        return YouTubeExtractor._rank_entries(entries, track)
 
-        candidates: List[CandidateTrack] = []
-        for entry in entries:
+    @staticmethod
+    def _rank_entries(entries: list, track: Track) -> List[CandidateTrack]:
+        track_title = track.name
+        artists = track.artists or []
+        track_duration_s = track.duration_ms / 1000 if track.duration_ms else None
+        scored = []
+        for position, entry in enumerate(entries):
             if not entry:
                 continue
 
@@ -85,24 +160,44 @@ class YouTubeExtractor:
             if not candidate_id or not title:
                 continue
 
-            uploader = entry.get("uploader") or entry.get("channel")
+            uploader = entry.get("uploader") or entry.get("channel") or ""
             duration = entry.get("duration")
             duration_ms = int(duration * 1000) if duration is not None else None
 
-            candidates.append(
-                CandidateTrack(
-                    id=candidate_id,
-                    title=title,
-                    artist=uploader,
-                    duration_ms=duration_ms,
-                )
-            )
+            recall = YouTubeExtractor._title_recall(title, track_title)
+            official = YouTubeExtractor._is_official_channel(uploader, artists)
+            if recall < YouTubeExtractor._TITLE_RECALL_MIN:
+                continue
+            if not YouTubeExtractor._artist_present(title, uploader, artists):
+                continue
+            if (
+                not official
+                and duration is not None
+                and track_duration_s is not None
+                and abs(duration - track_duration_s)
+                > YouTubeExtractor._DURATION_TOLERANCE_S
+            ):
+                continue
 
-        return candidates
+            views = entry.get("view_count")
+            score = YouTubeExtractor._coherence_score(recall, duration, track_duration_s, views)
+            scored.append((official, score, position, candidate_id, title, uploader, duration_ms))
+
+        # Official channel first, always; then coherence; YouTube order wins ties.
+        scored.sort(key=lambda row: (not row[0], -row[1], row[2]))
+        return [
+            CandidateTrack(
+                id=candidate_id,
+                title=title,
+                artist=uploader,
+                duration_ms=duration_ms,
+            )
+            for _, _, _, candidate_id, title, uploader, duration_ms in scored
+        ]
 
     @staticmethod
     def search_candidates(track: Track) -> List[CandidateTrack]:
-        """Fast search (< 0.4s) returning lightweight metadata candidates without extracting formats."""
+        """Same-song candidates with the official upload first (~1s)."""
         ydl_opts = {
             "extract_flat": "in_playlist",
             "skip_download": True,
@@ -112,7 +207,7 @@ class YouTubeExtractor:
 
         def run(ydl: yt_dlp.YoutubeDL) -> List[CandidateTrack]:
             for query in YouTubeExtractor._build_search_queries(track):
-                candidates = YouTubeExtractor._search_once(ydl, query)
+                candidates = YouTubeExtractor._search_once(ydl, query, track)
                 if candidates:
                     return candidates
             return []

@@ -14,10 +14,11 @@ MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle
 
 ## 🔎 Search query construction
 
-`search_candidates` issues **at most 2** queries (`ytsearch5:`, first 5 hits)
-and stops at the first one returning results:
+`search_candidates` issues **at most 2** queries (`ytsearch15:`, first 15 hits
+— same latency as 5, measured) and stops at the first one returning
+*same-song* candidates:
 
-1. **Raw join** of the title plus the provider artist list: `ytsearch5:Fanculo - Marracash 22simba` (one request in the common case).
+1. **Raw join** of the title plus the provider artist list: `ytsearch15:Fanculo - Marracash 22simba` (one request in the common case).
 2. **Smart split** (fallback, only if the raw form is empty): one entry packing
    several names (`"22simba feat. Marracash"`, `"A & B"`, `"A, B"`) is split
    and rejoined with spaces — the same bag of words YouTube tokenizes anyway.
@@ -27,6 +28,29 @@ before. Rationale: the metadata provider may list the featured artist first
 while YouTube indexes the track under the primary artist — `Marracash -
 Fanculo` returns zero entries while the joint form finds the official video
 (`Odvboh6aOWY`, "22simba - Fanculo feat. Marracash") on top.
+
+## 🎯 Same-song filter (official first)
+
+YouTube fills track queries with the artist's catalogue, so the raw hits are
+filtered to uploads that reproduce the searched song — no keywords, only
+language-free signals:
+
+1. **Title recall ≥ 0.5**: the searched title tokens must (mostly) appear in
+   the candidate title (accent-folded). Drops other songs, even from the
+   artist's own channel.
+2. **Artist present**: an artist token (len ≥ 2) in candidate title+uploader.
+3. **Duration veto ±15 s** (when both known): third-party uploads only.
+   Official-channel uploads are exempt — on the artist's channel an odd
+duration is an artistic choice (short film, video edit), on a third-party
+channel it is junk signal.
+
+Survivors are ordered with the **official channel first, always** (channel
+name token-contained in the artist name or vice versa, after stripping the
+YouTube-only suffixes `official`/`vevo`/`topic`/`music` — never when the
+suffix is part of the artist name itself), then by coherence
+(recall + duration proximity + log views), YouTube order winning ties.
+Views can never outrank the official tier. If nothing passes, the search
+returns `[]` — no junk fallback (loosen the filter instead).
 
 ## 🛡️ Player-client fallback (bot-check / age-gate)
 

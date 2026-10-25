@@ -1,3 +1,5 @@
+import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -7,7 +9,25 @@ from musicare_audio_plugin_sdk import (
     code_of,
 )
 from yt_dlp.utils import DownloadError
+from src.extractor import YouTubeExtractor
 from src.plugin import YouTubeAudioSourcePlugin
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "youtube_entries.json")
+
+
+def load_fixture(key):
+    with open(FIXTURES, encoding="utf-8") as fh:
+        case = json.load(fh)[key]
+    return case["entries"], case["track"]
+
+
+def track_from_fixture(key, **overrides):
+    _, data = load_fixture(key)
+    return Track(
+        name=overrides.get("name", data["name"]),
+        artists=overrides.get("artists", data["artists"]),
+        duration_ms=overrides.get("duration_ms", data["duration_ms"]),
+    )
 
 
 class TestYouTubePluginUnit(unittest.TestCase):
@@ -17,7 +37,12 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.2.3")
+        self.assertEqual(self.plugin.version, "1.2.4")
+
+    def test_manifest_version_matches_plugin_version(self):
+        manifest = os.path.join(os.path.dirname(__file__), "..", "plugin.json")
+        with open(manifest, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["version"], self.plugin.version)
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_candidates_parsing(self, mock_ydl_cls):
@@ -366,6 +391,266 @@ class TestYouTubePluginUnit(unittest.TestCase):
         track = Track(name="Breaking Me", artists=["Topic", "A7S"], duration_ms=174000)
         candidates = self._search(mock_ydl_cls, rows, track)
         self.assertEqual([c.id for c in candidates], ["aaa", "bbb"])
+
+
+class TestSearchGates(unittest.TestCase):
+    """Offline gates against recorded ytsearch15 responses (test/fixtures)."""
+
+    def setUp(self):
+        self.plugin = YouTubeAudioSourcePlugin()
+
+    def candidates(self, key, **overrides):
+        entries, _ = load_fixture(key)
+        return YouTubeExtractor._rank_entries(entries, track_from_fixture(key, **overrides))
+
+    def test_core_title_strips_disambiguators_and_edition_tails(self):
+        self.assertEqual(
+            YouTubeExtractor._core_title("Una chiave (Il colloquio - Aprirsi o chiudersi)"),
+            "Una chiave",
+        )
+        self.assertEqual(YouTubeExtractor._core_title("Song [Live] {2019}"), "Song")
+        self.assertEqual(YouTubeExtractor._core_title("Song - Remastered 2019"), "Song")
+        self.assertEqual(YouTubeExtractor._core_title("Song - 2011 Remaster"), "Song")
+        self.assertEqual(YouTubeExtractor._core_title("Song – Remastered"), "Song")
+        # A title made only of a bracketed group must not collapse to nothing.
+        self.assertEqual(YouTubeExtractor._core_title("(Intro)"), "(Intro)")
+
+    def test_tokens_keep_non_latin_titles(self):
+        self.assertEqual(
+            YouTubeExtractor._title_recall(
+                "YOASOBI - 夜に駆ける (Official Video)", "夜に駆ける"
+            ),
+            1.0,
+        )
+        self.assertEqual(YouTubeExtractor._core_title("夜に駆ける (Official Video)"), "夜に駆ける")
+        self.assertEqual(YouTubeExtractor._compact("Guè Pequeno"), "guèpequeno")
+        self.assertEqual(YouTubeExtractor._compact("R.E.M."), "rem")
+        self.assertEqual(YouTubeExtractor._compact("blink-182"), "blink182")
+
+    def test_una_chiave_relaxed_recovers_exact_upload(self):
+        candidates = self.candidates("una_chiave")
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0].id, "orgycZTgvUQ")
+        self.assertEqual(candidates[0].artist, "telecaparezza")
+
+    def test_ti_fa_stare_bene_relaxed_pass_returns_candidates(self):
+        candidates = self.candidates("ti_fa_stare_bene")
+        self.assertTrue(candidates)
+        for candidate in candidates:
+            self.assertIn("ti fa stare bene", candidate.title.lower())
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_core_query_runs_when_first_hit_is_a_live_bootleg(self, mock_ydl_cls):
+        raw = "ytsearch15:Ti fa stare bene (L'ora d'aria - Frivolo o impegnato) - Caparezza"
+        core = "ytsearch15:Ti fa stare bene - Caparezza"
+        responses = {
+            raw: load_fixture("ti_fa_stare_bene")[0],
+            core: load_fixture("ti_fa_stare_bene_core")[0],
+        }
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = lambda query, download=False: {
+            "entries": responses[query]
+        }
+
+        candidates = self.plugin.search_candidates(track_from_fixture("ti_fa_stare_bene"))
+
+        self.assertEqual(candidates[0].id, "84rgsCJOMUA")
+        self.assertEqual(candidates[0].artist, "telecaparezza")
+        issued = [call.args[0] for call in mock_ydl.extract_info.call_args_list]
+        self.assertEqual(issued, [raw, core])
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_core_query_is_the_only_source_when_raw_returns_nothing(self, mock_ydl_cls):
+        raw = "ytsearch15:La caduta di Atlante (Il peso - Sopruso o giustizia) - Caparezza"
+        core = "ytsearch15:La caduta di Atlante - Caparezza"
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.side_effect = lambda query, download=False: {
+            "entries": load_fixture("la_caduta_di_atlante_core")[0] if query == core else []
+        }
+
+        candidates = self.plugin.search_candidates(track_from_fixture("la_caduta_di_atlante"))
+
+        self.assertEqual(candidates[0].id, "2xMotUsFsVY")
+        self.assertEqual(candidates[0].artist, "telecaparezza")
+        issued = [call.args[0] for call in mock_ydl.extract_info.call_args_list]
+        self.assertEqual(issued, [raw, core])
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_core_query_skipped_when_artist_channel_wins(self, mock_ydl_cls):
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        mock_ydl.extract_info.return_value = {"entries": load_fixture("una_chiave")[0]}
+
+        candidates = self.plugin.search_candidates(track_from_fixture("una_chiave"))
+
+        self.assertEqual(candidates[0].artist, "telecaparezza")
+        mock_ydl.extract_info.assert_called_once_with(
+            "ytsearch15:Una chiave (Il colloquio - Aprirsi o chiudersi) - Caparezza",
+            download=False,
+        )
+
+    def test_la_caduta_di_atlante_needs_core_title_in_query(self):
+        # Recorded on 2026-10-25: the polluted query returns zero entries, so
+        # no gate can rescue this track — it needs the core title in the query.
+        entries, _ = load_fixture("la_caduta_di_atlante")
+        self.assertEqual(entries, [])
+        self.assertEqual(self.candidates("la_caduta_di_atlante"), [])
+
+    def test_everybody_hurts_initials_artist_gate(self):
+        candidates = self.candidates("everybody_hurts")
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0].id, "mhIay4-PbCY")
+        self.assertEqual(candidates[0].artist, "remhq")
+
+    def test_all_the_small_things_official_first(self):
+        candidates = self.candidates("all_the_small_things")
+        self.assertEqual(candidates[0].id, "9Ht5RZpzPqw")
+        self.assertEqual(candidates[0].artist, "blink-182")
+
+    def test_headlight_singular_title_is_a_known_title_mismatch(self):
+        # YouTube's official upload is "Headlights": recall is 0.00 on both
+        # measures, so no gate change helps (open item, needs title matching).
+        self.assertEqual(self.candidates("headlight"), [])
+
+    def test_negative_other_artist_same_title_kept_out(self):
+        candidates = self.candidates(
+            "headlight", name="Headlights", artists=["Alex Warren"], duration_ms=164000
+        )
+        ids = [candidate.id for candidate in candidates]
+        self.assertIn("hJskvsP--6o", ids)
+        self.assertNotIn("kyLuzKbgXAs", ids)
+
+    def test_parenthetical_trigger_keeps_exact_and_drops_studio(self):
+        candidates = self.candidates(
+            "bohemian_live_aid",
+            name="Bohemian Rhapsody (Live Aid 1985)",
+            duration_ms=165000,
+        )
+        ids = [candidate.id for candidate in candidates]
+        self.assertIn("vbvyNnw8Qjg", ids)
+        self.assertNotIn("fJ9rUzIMcZQ", ids)
+        self.assertNotIn("kM0Fpbz0W8U", ids)
+
+    def test_attached_suffixes_are_official(self):
+        self.assertTrue(YouTubeExtractor._is_official_channel("blink182VEVO", ["blink-182"]))
+        self.assertTrue(YouTubeExtractor._is_official_channel("TheBeatlesVEVO", ["The Beatles"]))
+        self.assertTrue(YouTubeExtractor._is_official_channel("U2VEVO", ["U2"]))
+        self.assertTrue(YouTubeExtractor._is_official_channel("IlVoloVEVO", ["Il Volo"]))
+        self.assertFalse(YouTubeExtractor._is_official_channel("telecaparezza", ["Caparezza"]))
+
+    def test_attached_suffix_kept_when_part_of_artist_name(self):
+        self.assertTrue(YouTubeExtractor._is_official_channel("Topic", ["DJ Topic"]))
+        self.assertTrue(YouTubeExtractor._is_official_channel("Topic", ["Topic", "A7S"]))
+
+    def test_single_word_of_multiword_name_does_not_pass(self):
+        self.assertFalse(
+            YouTubeExtractor._artist_ok(
+                "Sowing the Seeds of Love", "Radio X", ["Tears for Fears"], False
+            )
+        )
+        self.assertFalse(
+            YouTubeExtractor._artist_ok("This Is the Day", "Radio X", ["The The"], False)
+        )
+        self.assertTrue(
+            YouTubeExtractor._artist_ok("Everybody Hurts", "remhq", ["R.E.M."], False)
+        )
+
+    def test_beatles_official_first(self):
+        candidates = self.candidates("come_together")
+        self.assertEqual(candidates[0].id, "45cYwDMibGo")
+
+    def test_acdc_official_first(self):
+        candidates = self.candidates("back_in_black")
+        self.assertEqual(candidates[0].id, "pAgnJDJN4VA")
+
+    def test_il_volo_official_first(self):
+        candidates = self.candidates("grande_amore")
+        self.assertEqual(candidates[0].id, "w1f6o1HQBvg")
+
+    def test_u2_official_first(self):
+        candidates = self.candidates("with_or_without_you")
+        self.assertEqual(candidates[0].id, "ujNeHIo7oTE")
+
+    def test_dj_topic_official_from_recorded_search(self):
+        candidates = self.candidates("breaking_me")
+        self.assertTrue(candidates)
+        self.assertTrue(
+            YouTubeExtractor._is_official_channel(candidates[0].artist, ["Topic", "A7S"])
+        )
+
+    def test_track_without_artists_relaxed_gate_is_neutral(self):
+        entries = [
+            {"id": "abc", "title": "Nightfall", "uploader": "Some Channel", "duration": 200},
+            {"id": "def", "title": "Other Song", "uploader": "Some Channel", "duration": 200},
+        ]
+        track = Track(name="Nightfall", artists=[], duration_ms=200000)
+        ids = [c.id for c in YouTubeExtractor._rank_entries(entries, track)]
+        self.assertEqual(ids, ["abc"])
+
+    def test_pooling_appends_relaxed_to_strict(self):
+        # raw tokens 4, core 1: "Alpha Beta" is a strict survivor (raw 0.5),
+        # "Alpha" only a relaxed one (raw 0.25, core 1.0). Both must survive,
+        # strict first — a relaxed pass that replaced strict would drop one.
+        entries = [
+            {"id": "strict", "title": "Alpha Beta", "uploader": "Artist", "duration": 200},
+            {"id": "relaxed", "title": "Alpha", "uploader": "Artist", "duration": 200},
+        ]
+        track = Track(name="Alpha (Beta Gamma Delta)", artists=["Artist"], duration_ms=200000)
+        ids = [c.id for c in YouTubeExtractor._rank_entries(entries, track)]
+        self.assertEqual(ids, ["strict", "relaxed"])
+
+    def test_non_latin_track_survives_the_whole_pipeline(self):
+        entries = [
+            {
+                "id": "yoasobi",
+                "title": "YOASOBI - 夜に駆ける (Official Video)",
+                "uploader": "YOASOBI",
+                "duration": 260,
+            }
+        ]
+        track = Track(name="夜に駆ける", artists=["YOASOBI"], duration_ms=260000)
+        ids = [c.id for c in YouTubeExtractor._rank_entries(entries, track)]
+        self.assertEqual(ids, ["yoasobi"])
+
+    def test_lookalike_channel_is_not_official(self):
+        self.assertFalse(YouTubeExtractor._is_official_channel("U23", ["U2"]))
+        self.assertFalse(YouTubeExtractor._is_official_channel("U2 Tribute Band", ["U2"]))
+
+    @patch("src.extractor.yt_dlp.YoutubeDL")
+    def test_recorded_tracks_regression_table(self, mock_ydl_cls):
+        """One row per measured track: first hit and query count must not drift."""
+        with open(FIXTURES, encoding="utf-8") as fh:
+            responses = {case["query"]: case["entries"] for case in json.load(fh).values()}
+
+        expected = {
+            "una_chiave": ("orgycZTgvUQ", 1),
+            "ti_fa_stare_bene": ("84rgsCJOMUA", 2),
+            "la_caduta_di_atlante": ("2xMotUsFsVY", 2),
+            "everybody_hurts": ("mhIay4-PbCY", 1),
+            "all_the_small_things": ("9Ht5RZpzPqw", 1),
+            "headlight": (None, 1),
+            "come_together": ("45cYwDMibGo", 1),
+            "back_in_black": ("pAgnJDJN4VA", 1),
+            "grande_amore": ("w1f6o1HQBvg", 1),
+            "with_or_without_you": ("ujNeHIo7oTE", 1),
+            "breaking_me": ("IiHDaFq1XEY", 1),
+        }
+
+        mock_ydl = MagicMock()
+        mock_ydl_cls.return_value.__enter__.return_value = mock_ydl
+        for key, (first_id, query_count) in expected.items():
+            with self.subTest(track=key):
+                mock_ydl.extract_info.reset_mock()
+                mock_ydl.extract_info.side_effect = lambda query, download=False: {
+                    "entries": responses.get(query, [])
+                }
+                candidates = self.plugin.search_candidates(track_from_fixture(key))
+                self.assertEqual(
+                    candidates[0].id if candidates else None, first_id
+                )
+                self.assertEqual(mock_ydl.extract_info.call_count, query_count)
 
 
 if __name__ == "__main__":

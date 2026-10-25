@@ -23,6 +23,15 @@ class YouTubeExtractor:
         re.IGNORECASE,
     )
 
+    # Letters and digits of any script: an ASCII fold would turn a non-Latin
+    # title (夜に駆ける) into an empty string and zero its recall.
+    _WORD_PATTERN = re.compile(r"[^\W_]+")
+    _BRACKETED_PATTERN = re.compile(r"[\(\[\{][^\)\]\}]*[\)\]\}]")
+    _EDITION_SUFFIX_PATTERN = re.compile(
+        r"\s*[-–—]\s*(?:(?:19|20)\d{2}\s+)?remaster(?:ed)?(?:\s+(?:19|20)\d{2})?.*$",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def _artist_terms(track: Track) -> List[str]:
         terms: List[str] = []
@@ -36,15 +45,23 @@ class YouTubeExtractor:
     @staticmethod
     def _build_search_queries(track: Track) -> List[str]:
         # Raw join first (one request in the common case); the smart split
-        # runs only when the raw form returns nothing. At most 2 queries.
-        # 15 hits cost the same as 5 (measured): depth for the same-song
-        # filter below, which needs more than the top-5 to work with.
+        # (packed artist credits) and the core title (MusicBrainz
+        # disambiguators) are fallbacks. At most 3 queries, 1 in the happy
+        # path. 15 hits cost the same as 5 (measured): depth for the
+        # same-song filter below, which needs more than the top-5 to work with.
         artists = [a.strip() for a in (track.artists or []) if a and a.strip()]
         title = track.name.strip()
-        raw = f"ytsearch15:{title} - {' '.join(artists)}" if artists else f"ytsearch15:{title}"
+        suffix = f" - {' '.join(artists)}" if artists else ""
+        raw = f"ytsearch15:{title}{suffix}"
         terms = YouTubeExtractor._artist_terms(track)
         smart = f"ytsearch15:{title} - {' '.join(terms)}" if terms else f"ytsearch15:{title}"
-        return list(dict.fromkeys([raw, smart]))
+        queries = [raw, smart]
+        core = YouTubeExtractor._core_title(title)
+        # A disambiguator can wipe the results entirely
+        # (measured: "La caduta di Atlante (Il peso - …)" -> 0 entries).
+        if YouTubeExtractor._tokens(core) != YouTubeExtractor._tokens(title):
+            queries.append(f"ytsearch15:{core}{suffix}")
+        return list(dict.fromkeys(queries))
 
     # YouTube channel naming conventions (not words with meaning): stripped
     # from the uploader name before the official-channel check below.
@@ -59,48 +76,121 @@ class YouTubeExtractor:
     _DURATION_TOLERANCE_S = 15
 
     @staticmethod
-    def _normalize(text: str) -> str:
-        folded = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode()
-        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", folded.lower())).strip()
+    def _tokens(text: str) -> List[str]:
+        folded = unicodedata.normalize("NFKC", text or "").casefold()
+        return YouTubeExtractor._WORD_PATTERN.findall(folded)
+
+    @staticmethod
+    def _compact(text: str) -> str:
+        return "".join(YouTubeExtractor._tokens(text))
+
+    @staticmethod
+    def _core_title(title: str) -> str:
+        """Title without disambiguators/edition tails: the part that names the song.
+
+        MusicBrainz appends the disambiguation in parentheses ("Una chiave (Il
+        colloquio - Aprirsi o chiudersi)"); keeping it in the recall denominator
+        rejects the exact video (measured: 0.29).
+        """
+        text = YouTubeExtractor._BRACKETED_PATTERN.sub(" ", title or "")
+        text = YouTubeExtractor._EDITION_SUFFIX_PATTERN.sub("", text)
+        text = re.sub(r"\s+", " ", text).strip(" -–—:|/")
+        return text or (title or "").strip()
 
     @staticmethod
     def _title_recall(candidate_title: str, track_title: str) -> float:
-        wanted = YouTubeExtractor._normalize(track_title).split()
+        wanted = YouTubeExtractor._tokens(track_title)
         if not wanted:
             return 0.0
-        present = set(YouTubeExtractor._normalize(candidate_title).split())
+        present = set(YouTubeExtractor._tokens(candidate_title))
         return sum(1 for token in wanted if token in present) / len(wanted)
 
     @staticmethod
-    def _artist_present(candidate_title: str, uploader: str, artists: List[str]) -> bool:
-        pool = set(
-            YouTubeExtractor._normalize(candidate_title).split()
-            + YouTubeExtractor._normalize(uploader).split()
+    def _artist_keys(artists: List[str]) -> List[str]:
+        keys = [YouTubeExtractor._compact(artist) for artist in artists or []]
+        return [key for key in keys if key]
+
+    @staticmethod
+    def _anchored(key: str, tokens: List[str]) -> bool:
+        return any(token.startswith(key) or token.endswith(key) for token in tokens)
+
+    @staticmethod
+    def _artist_ok(
+        candidate_title: str, uploader: str, artists: List[str], official: bool
+    ) -> bool:
+        """Official upload, or the compacted whole artist name on a token edge.
+
+        S1: compact full name ("caparezza" vs "telecaparezza", "rem" vs
+        "remhq", "blink182" vs "blink182vevo"). S2: initials (R.E.M. -> "rem")
+        compact to the same key. Never a single word of a multi-word name: that
+        is how "Tears for Fears" used to pass on "for".
+        """
+        if official:
+            return True
+        tokens = [
+            YouTubeExtractor._compact(token)
+            for token in YouTubeExtractor._tokens(f"{candidate_title} {uploader}")
+        ]
+        return any(
+            YouTubeExtractor._anchored(key, tokens)
+            for key in YouTubeExtractor._artist_keys(artists)
         )
-        for artist in artists or []:
-            for token in YouTubeExtractor._normalize(artist).split():
-                if len(token) >= 2 and token in pool:
-                    return True
-        return False
+
+    @staticmethod
+    def _from_artist(uploader: str, artists: List[str]) -> bool:
+        """The upload comes from the artist side (official channel or own handle).
+
+        Used to decide whether the core-title query is worth one more request:
+        a live bootleg first hit does not come from the artist, the artist's
+        own `telecaparezza` does.
+        """
+        if YouTubeExtractor._is_official_channel(uploader, artists):
+            return True
+        tokens = [
+            YouTubeExtractor._compact(token)
+            for token in YouTubeExtractor._tokens(uploader)
+        ]
+        return any(
+            YouTubeExtractor._anchored(key, tokens)
+            for key in YouTubeExtractor._artist_keys(artists)
+        )
 
     @staticmethod
     def _is_official_channel(uploader: str, artists: List[str]) -> bool:
-        channel = YouTubeExtractor._normalize(uploader).split()
-        names = set()
-        for artist in artists or []:
-            names.update(YouTubeExtractor._normalize(artist).split())
+        channel = [
+            YouTubeExtractor._compact(token)
+            for token in YouTubeExtractor._tokens(uploader)
+        ]
+        names = set(YouTubeExtractor._tokens(" ".join(artists or [])))
+        compact_names = {
+            YouTubeExtractor._compact(artist) for artist in artists or []
+        } - {""}
         # A suffix is stripped only when it is not part of the artist name
         # itself (e.g. DJ Topic keeps his "topic"); never strip to empty.
-        kept = [
-            token
-            for token in channel
-            if token not in YouTubeExtractor._CHANNEL_SUFFIXES or token in names
-        ] or channel
-        uploader_set, artist_set = set(kept), names
-        if not uploader_set or not artist_set:
+        kept = []
+        for token in channel:
+            if token in names or token in compact_names:
+                kept.append(token)
+                continue
+            stem = token
+            for suffix in YouTubeExtractor._CHANNEL_SUFFIXES:
+                if stem == suffix:
+                    stem = ""
+                    break
+                if stem.endswith(suffix) and len(stem) > len(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            if stem:
+                kept.append(stem)
+        kept = kept or channel
+        uploader_set = set(kept)
+        if not uploader_set or not (names or compact_names):
             return False
-        contains = uploader_set <= artist_set or artist_set <= uploader_set
-        return contains and len(uploader_set) <= len(artist_set) + 1
+        if uploader_set <= names or names <= uploader_set:
+            return len(uploader_set) <= len(names) + 1
+        # Attached suffixes leave one compact token ("TheBeatlesVEVO" ->
+        # "thebeatles", "U2VEVO" -> "u2"): compare whole names as well.
+        return uploader_set <= compact_names
 
     @staticmethod
     def _coherence_score(recall: float, duration_s, track_duration_s, views) -> float:
@@ -140,17 +230,33 @@ class YouTubeExtractor:
                 raise classify_download_error(second, fallback_of=first) from second
 
     @staticmethod
-    def _search_once(ydl: yt_dlp.YoutubeDL, query: str, track: Track) -> List[CandidateTrack]:
+    def _fetch_entries(ydl: yt_dlp.YoutubeDL, query: str) -> list:
         info = ydl.extract_info(query, download=False) or {}
-        entries = info.get("entries") or []
-        return YouTubeExtractor._rank_entries(entries, track)
+        return info.get("entries") or []
+
+    @staticmethod
+    def _merge_entries(new_entries: list, current: list) -> list:
+        """Newest response first, videos already seen dropped (new keeps the position)."""
+        seen = set()
+        merged = []
+        for entry in list(new_entries) + list(current):
+            if not entry:
+                continue
+            entry_id = str(entry.get("id", ""))
+            if entry_id and entry_id in seen:
+                continue
+            seen.add(entry_id)
+            merged.append(entry)
+        return merged
 
     @staticmethod
     def _rank_entries(entries: list, track: Track) -> List[CandidateTrack]:
         track_title = track.name
-        artists = track.artists or []
+        core_title = YouTubeExtractor._core_title(track_title)
+        artists = [a.strip() for a in (track.artists or []) if a and a.strip()]
         track_duration_s = track.duration_ms / 1000 if track.duration_ms else None
-        scored = []
+
+        rows = []
         for position, entry in enumerate(entries):
             if not entry:
                 continue
@@ -162,38 +268,86 @@ class YouTubeExtractor:
 
             uploader = entry.get("uploader") or entry.get("channel") or ""
             duration = entry.get("duration")
-            duration_ms = int(duration * 1000) if duration is not None else None
-
-            recall = YouTubeExtractor._title_recall(title, track_title)
             official = YouTubeExtractor._is_official_channel(uploader, artists)
-            if recall < YouTubeExtractor._TITLE_RECALL_MIN:
-                continue
-            if not YouTubeExtractor._artist_present(title, uploader, artists):
-                continue
+            rows.append(
+                {
+                    "id": candidate_id,
+                    "title": title,
+                    "uploader": uploader,
+                    "duration": duration,
+                    "duration_ms": int(duration * 1000) if duration is not None else None,
+                    "views": entry.get("view_count"),
+                    "position": position,
+                    "official": official,
+                    "recall_raw": YouTubeExtractor._title_recall(title, track_title),
+                    "recall_core": YouTubeExtractor._title_recall(title, core_title),
+                    "artist_ok": YouTubeExtractor._artist_ok(title, uploader, artists, official),
+                }
+            )
+
+        def survives(row, recall_key, artist_gate=True):
+            if row[recall_key] < YouTubeExtractor._TITLE_RECALL_MIN:
+                return False
+            if artist_gate and not row["artist_ok"]:
+                return False
+            duration = row["duration"]
             if (
-                not official
+                not row["official"]
                 and duration is not None
                 and track_duration_s is not None
-                and abs(duration - track_duration_s)
-                > YouTubeExtractor._DURATION_TOLERANCE_S
+                and abs(duration - track_duration_s) > YouTubeExtractor._DURATION_TOLERANCE_S
             ):
-                continue
+                return False
+            return True
 
-            views = entry.get("view_count")
-            score = YouTubeExtractor._coherence_score(recall, duration, track_duration_s, views)
-            scored.append((official, score, position, candidate_id, title, uploader, duration_ms))
+        def ordered(pool, recall_key):
+            scored = [
+                (
+                    not row["official"],
+                    -YouTubeExtractor._coherence_score(
+                        row[recall_key],
+                        row["duration"],
+                        track_duration_s,
+                        row["views"],
+                    ),
+                    row["position"],
+                    row,
+                )
+                for row in pool
+            ]
+            # Official channel first, always; then coherence; YouTube order wins ties.
+            scored.sort(key=lambda item: item[:3])
+            return [row for _, _, _, row in scored]
 
-        # Official channel first, always; then coherence; YouTube order wins ties.
-        scored.sort(key=lambda row: (not row[0], -row[1], row[2]))
-        return [
-            CandidateTrack(
-                id=candidate_id,
-                title=title,
-                artist=uploader,
-                duration_ms=duration_ms,
-            )
-            for _, _, _, candidate_id, title, uploader, duration_ms in scored
-        ]
+        def to_candidates(pool):
+            return [
+                CandidateTrack(
+                    id=row["id"],
+                    title=row["title"],
+                    artist=row["uploader"],
+                    duration_ms=row["duration_ms"],
+                )
+                for row in pool
+            ]
+
+        strict = ordered([row for row in rows if survives(row, "recall_raw")], "recall_raw")
+        # A perfect raw recall means the candidate title *is* the searched one:
+        # a parenthetical that is part of the title ("Song (Live at X)") must
+        # not be diluted by the studio version, so relaxed never runs.
+        exact = [row for row in strict if row["recall_raw"] >= 1.0]
+        if exact:
+            return to_candidates(exact)
+
+        relaxed = ordered(
+            [
+                row
+                for row in rows
+                if survives(row, "recall_core", artist_gate=bool(artists))
+            ],
+            "recall_core",
+        )
+        seen = {row["id"] for row in strict}
+        return to_candidates(strict + [row for row in relaxed if row["id"] not in seen])
 
     @staticmethod
     def search_candidates(track: Track) -> List[CandidateTrack]:
@@ -204,13 +358,20 @@ class YouTubeExtractor:
             "quiet": True,
             "no_warnings": True,
         }
+        artists = [a.strip() for a in (track.artists or []) if a and a.strip()]
 
         def run(ydl: yt_dlp.YoutubeDL) -> List[CandidateTrack]:
+            entries, candidates = [], []
             for query in YouTubeExtractor._build_search_queries(track):
-                candidates = YouTubeExtractor._search_once(ydl, query, track)
-                if candidates:
+                entries = YouTubeExtractor._merge_entries(
+                    YouTubeExtractor._fetch_entries(ydl, query), entries
+                )
+                candidates = YouTubeExtractor._rank_entries(entries, track)
+                # Keep the extra request budget for real misses: a hit from the
+                # artist's own channel is already the best answer available.
+                if candidates and YouTubeExtractor._from_artist(candidates[0].artist, artists):
                     return candidates
-            return []
+            return candidates
 
         return YouTubeExtractor._with_client_fallback(ydl_opts, run)
 

@@ -14,14 +14,21 @@ MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle
 
 ## 🔎 Search query construction
 
-`search_candidates` issues **at most 2** queries (`ytsearch15:`, first 15 hits
-— same latency as 5, measured) and stops at the first one returning
-*same-song* candidates:
+`search_candidates` issues **at most 3** queries (`ytsearch15:`, first 15 hits
+— same latency as 5, measured) and stops as soon as the best candidate comes
+from the artist side (official channel or the artist's own handle):
 
 1. **Raw join** of the title plus the provider artist list: `ytsearch15:Fanculo - Marracash 22simba` (one request in the common case).
 2. **Smart split** (fallback, only if the raw form is empty): one entry packing
    several names (`"22simba feat. Marracash"`, `"A & B"`, `"A, B"`) is split
    and rejoined with spaces — the same bag of words YouTube tokenizes anyway.
+3. **Core title** (only when it differs from the searched title and the best
+   hit so far is not the artist's): `ytsearch15:Ti fa stare bene - Caparezza`.
+   MusicBrainz disambiguators can hide the official upload from the raw query:
+   *La caduta di Atlante* returns **0 entries** raw and `telecaparezza` first
+   with the core title; *Ti fa stare bene* returns live bootlegs raw and
+   `telecaparezza` first with the core title. One extra request only on those
+   misses, never in the happy path.
 
 Single clean artists collapse to one query (both forms coincide), exactly as
 before. Rationale: the metadata provider may list the featured artist first
@@ -29,28 +36,59 @@ while YouTube indexes the track under the primary artist — `Marracash -
 Fanculo` returns zero entries while the joint form finds the official video
 (`Odvboh6aOWY`, "22simba - Fanculo feat. Marracash") on top.
 
+The same-song gates below never issue extra requests: they re-rank the hits of
+the queries already issued.
+
 ## 🎯 Same-song filter (official first)
 
 YouTube fills track queries with the artist's catalogue, so the raw hits are
 filtered to uploads that reproduce the searched song — no keywords, only
-language-free signals:
+language-free signals. Text is compared after `NFKC` + `casefold` tokenization
+over letters and digits **of any script**: an ASCII fold zeroed non-Latin
+titles such as `夜に駆ける` and their recall with them.
 
-1. **Title recall ≥ 0.5**: the searched title tokens must (mostly) appear in
-   the candidate title (accent-folded). Drops other songs, even from the
-   artist's own channel.
-2. **Artist present**: an artist token (len ≥ 2) in candidate title+uploader.
-3. **Duration veto ±15 s** (when both known): third-party uploads only.
-   Official-channel uploads are exempt — on the artist's channel an odd
-duration is an artistic choice (short film, video edit), on a third-party
-channel it is junk signal.
+1. **Two recalls**: `recall_raw` on the full searched title, `recall_core` on
+the title without `()`/`[]`/`{}` groups and edition tails (`- Remastered
+2019`, `- 2011 Remaster`). MusicBrainz appends its disambiguation in
+parentheses, and keeping it in the denominator rejected the exact video
+(measured: `Una chiave (Il colloquio - Aprirsi o chiudersi)` → 0.29).
+2. **STRICT pass**: `recall_raw ≥ 0.5` ∧ artist gate ∧ duration veto. If a
+survivor has `recall_raw == 1.0` only those are returned: a parenthetical that
+is part of the title (`Song (Live at X)`) must not be diluted by the studio
+version.
+3. **RELAXED pass** (only when no perfect raw match exists): `recall_core ≥
+0.5`, same artist gate and duration veto (a track without artists is neutral
+here, never in the strict pass). Survivors are **appended** to the strict ones
+(deduplicated by video id), never substituted. If nothing passes, the search
+returns `[]` — no junk fallback (loosen the filter instead).
+
+Shared by both passes:
+- **Artist gate** (no word splitting, no article lists): official channel, or the
+  **compacted whole name** of the artist on a token edge — `caparezza`⊂
+  `telecaparezza`, `rem`⊂`remhq`, `blink182`⊂`blink182vevo`, `u2`⊂`u2vevo`;
+  initials spelled `R.E.M.`, `R.E.M` or `R E M` compact to the same key. A
+  single word of a multi-word name never matches (that is how `Tears for Fears`
+  used to pass on `for`, and `The The` on `the`). Fuzzy matching was evaluated
+  and rejected: a 0.80 similarity ratio still rejects the real channel handles
+  (`U2VEVO`), while the compacted name resolves them. The token-edge anchoring
+  is deliberately loose — a token `u23` also contains `u2` — the title-recall
+  and duration gates carry the rest.
+- **Duration veto ±15 s** (when both known): third-party uploads only.
+  Official-channel uploads are exempt — on the artist's channel an odd duration
+  is an artistic choice (short film, video edit), on a third-party channel it is
+  junk signal.
+
+Known limit: a title that simply does not match YouTube's upload (`Headlight`
+vs `Headlights`) is still rejected by the recall — that needs title matching,
+not a gate change.
 
 Survivors are ordered with the **official channel first, always** (channel
 name token-contained in the artist name or vice versa, after stripping the
-YouTube-only suffixes `official`/`vevo`/`topic`/`music` — never when the
-suffix is part of the artist name itself), then by coherence
+YouTube-only suffixes `official`/`vevo`/`topic`/`music` — **including when they
+are attached**, as in `blink182VEVO`/`TheBeatlesVEVO`, and never when the
+suffix is part of the artist name itself, e.g. DJ `Topic`), then by coherence
 (recall + duration proximity + log views), YouTube order winning ties.
-Views can never outrank the official tier. If nothing passes, the search
-returns `[]` — no junk fallback (loosen the filter instead).
+Views can never outrank the official tier.
 
 ## 🛡️ Player-client fallback (bot-check / age-gate)
 

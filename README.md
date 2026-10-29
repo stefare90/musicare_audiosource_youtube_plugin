@@ -36,59 +36,72 @@ while YouTube indexes the track under the primary artist — `Marracash -
 Fanculo` returns zero entries while the joint form finds the official video
 (`Odvboh6aOWY`, "22simba - Fanculo feat. Marracash") on top.
 
-The same-song gates below never issue extra requests: they re-rank the hits of
-the queries already issued.
+The ranking below never issues extra requests: it scores the hits of the
+queries already issued.
 
-## 🎯 Same-song filter (official first)
+## 🎯 Same-song ranking (score, floor, top N)
 
-YouTube fills track queries with the artist's catalogue, so the raw hits are
-filtered to uploads that reproduce the searched song — no keywords, only
-language-free signals. Text is compared after `NFKC` + `casefold` tokenization
-over letters and digits **of any script**: an ASCII fold zeroed non-Latin
-titles such as `夜に駆ける` and their recall with them.
+YouTube fills track queries with the artist's catalogue, so every hit is
+scored and only the ones above a confidence floor are returned, best first —
+no keywords, only language-free signals. Text is compared after `NFKD` +
+combining-mark removal + `casefold` tokenization over letters and digits **of
+any script**: an ASCII fold zeroed non-Latin titles such as `夜に駆ける`, while
+the accent fold keeps them and still lets accented metadata meet unaccented
+uploads (`Beyoncé` → `beyonce`, `Måneskin` → `maneskin`, `però` → `pero`).
 
-1. **Two recalls**: `recall_raw` on the full searched title, `recall_core` on
-the title without `()`/`[]`/`{}` groups and edition tails (`- Remastered
-2019`, `- 2011 Remaster`). MusicBrainz appends its disambiguation in
-parentheses, and keeping it in the denominator rejected the exact video
-(measured: `Una chiave (Il colloquio - Aprirsi o chiudersi)` → 0.29).
-2. **STRICT pass**: `recall_raw ≥ 0.5` ∧ artist gate ∧ duration veto. If a
-survivor has `recall_raw == 1.0` only those are returned: a parenthetical that
-is part of the title (`Song (Live at X)`) must not be diluted by the studio
-version.
-3. **RELAXED pass** (only when no perfect raw match exists): `recall_core ≥
-0.5`, same artist gate and duration veto (a track without artists is neutral
-here, never in the strict pass). Survivors are **appended** to the strict ones
-(deduplicated by video id), never substituted. If nothing passes, the search
-returns `[]` — no junk fallback (loosen the filter instead).
+**Signals**
+- **Title**: `recall_core + 0.15·recall_raw` (capped at 1.0). `recall_core` is
+  computed on the title without `()`/`[]`/`{}` groups and edition tails
+  (`- Remastered 2019`), because MusicBrainz appends its disambiguation in
+  parentheses (measured: `Una chiave (Il colloquio - Aprirsi o chiudersi)` →
+  0.29 raw). The raw recall only breaks ties toward the exact title.
+- **Artist tier**: 1.0 official channel · 0.9 the compacted whole name on a
+  run of consecutive tokens (`caparezza`⊂`telecaparezza`, `rem`⊂`remhq`,
+  `blink182`⊂`blink182vevo`, `fabrifibra` ← `Fabri Fibra - Tranne Te`) · 0.8 a
+  distinctive two-token run, which is how a related name passes
+  (`creedence clearwater` between Revival and Revisited) · 0 otherwise. A
+  single word of a multi-word name never matches on its own (that is how
+  `Tears for Fears` used to pass on `for`, and `The The` on `the`).
+  Initials spelled `R.E.M.`, `R.E.M` or `R E M` compact to the same key.
+- **Duration**: `1 − |Δ|/300` when both durations are known. An official
+  upload is never discarded for its duration, but a 326 s live still ranks
+  below the 165 s studio on proximity.
+- **Cleanliness**: the title outside brackets, with artist names removed, is
+  compared with the searched title; any bracket carries a flat 0.03 penalty.
+  This is what makes a plain upload beat its own `NEW VERSION`, `(HUGEL
+  Remix)`, `(Live …)` or `(+ testo)` variant without any keyword list. When a
+  song has both a plain official upload and a bracketed official sibling, the
+  plain one gets a further **+0.03 canonical bonus** — no channel, no keyword,
+  only the presence of the sibling variant.
+- **YouTube position**: `1 − position/15`. The canonical upload is usually
+  the first hit, so a later live/remix needs a better title/duration to win.
+- **Views**: `log10(1+views)` as a small tie-breaker only.
 
-Shared by both passes:
-- **Artist gate** (no word splitting, no article lists): official channel, or the
-  **compacted whole name** of the artist on a token edge — `caparezza`⊂
-  `telecaparezza`, `rem`⊂`remhq`, `blink182`⊂`blink182vevo`, `u2`⊂`u2vevo`;
-  initials spelled `R.E.M.`, `R.E.M` or `R E M` compact to the same key. A
-  single word of a multi-word name never matches (that is how `Tears for Fears`
-  used to pass on `for`, and `The The` on `the`). Fuzzy matching was evaluated
-  and rejected: a 0.80 similarity ratio still rejects the real channel handles
-  (`U2VEVO`), while the compacted name resolves them. The token-edge anchoring
-  is deliberately loose — a token `u23` also contains `u2` — the title-recall
-  and duration gates carry the rest.
-- **Duration veto ±15 s** (when both known): third-party uploads only.
-  Official-channel uploads are exempt — on the artist's channel an odd duration
-  is an artistic choice (short film, video edit), on a third-party channel it is
-  junk signal.
+**Score** = `0.30·title + 0.28·artist + 0.10·duration + 0.14·cleanliness +
+0.13·position + 0.05·views` (+0.03 canonical bonus where it applies), plus a
+**+0.04 channel bonus** for the official channel (channel name contained in the
+artist name or vice versa, after stripping the YouTube-only suffixes
+`official`/`vevo`/`topic`/`music` — **including when attached**, as in
+`blink182VEVO`/`TheBeatlesVEVO`, and never when the suffix is part of the
+artist name itself, e.g. DJ `Topic`). The official channel is a bonus, **not a
+hard key**: sorted with the **exact raw title first**, then the score, then
+YouTube order, so a clearly better title can beat an official upload (measured:
+the exact Live Aid upload beats the official medley). Views never outrank an
+exact title.
+
+**Confidence floor** (the only thing discarded): `title ≥ 0.5`; an artist match
+(official, exact or related); and a possible duration (`official` is always
+accepted, an artist match allows Δ ≤ 30 s, a track without artists Δ ≤ 15 s).
+An exact title by an unrelated artist is not enough: it is someone else's
+recording (the related-name tier is what covers `Creedence Clearwater
+Revisited` vs `Revival`).
+
+At most **10** candidates are returned. If nothing clears the floor the
+search returns `[]` — no junk fallback (loosen the floor instead).
 
 Known limit: a title that simply does not match YouTube's upload (`Headlight`
-vs `Headlights`) is still rejected by the recall — that needs title matching,
-not a gate change.
-
-Survivors are ordered with the **official channel first, always** (channel
-name token-contained in the artist name or vice versa, after stripping the
-YouTube-only suffixes `official`/`vevo`/`topic`/`music` — **including when they
-are attached**, as in `blink182VEVO`/`TheBeatlesVEVO`, and never when the
-suffix is part of the artist name itself, e.g. DJ `Topic`), then by coherence
-(recall + duration proximity + log views), YouTube order winning ties.
-Views can never outrank the official tier.
+vs `Headlights`) still scores 0 on the title and is rejected — that needs
+title matching, not a floor change.
 
 ## 🛡️ Player-client fallback (bot-check / age-gate)
 

@@ -37,7 +37,7 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.2.4")
+        self.assertEqual(self.plugin.version, "1.2.5")
 
     def test_manifest_version_matches_plugin_version(self):
         manifest = os.path.join(os.path.dirname(__file__), "..", "plugin.json")
@@ -348,8 +348,10 @@ class TestYouTubePluginUnit(unittest.TestCase):
         ids = [c.id for c in candidates]
         self.assertEqual(ids[0], "WHxYkr2HU90")
         self.assertIn("Odvboh6aOWY", ids)
-        for dropped in ("SSMqb2A3Bl0", "zh00Cp5T8jU", "3pVCFx1kptk"):
+        for dropped in ("zh00Cp5T8jU", "3pVCFx1kptk"):
             self.assertNotIn(dropped, ids)
+        # The karaoke is an alternative, never the autoplayed first match.
+        self.assertGreater(ids.index("SSMqb2A3Bl0"), 0)
         for candidate in candidates:
             self.assertIn("fanculo", candidate.title.lower())
 
@@ -423,9 +425,119 @@ class TestSearchGates(unittest.TestCase):
             1.0,
         )
         self.assertEqual(YouTubeExtractor._core_title("夜に駆ける (Official Video)"), "夜に駆ける")
-        self.assertEqual(YouTubeExtractor._compact("Guè Pequeno"), "guèpequeno")
+        self.assertEqual(YouTubeExtractor._compact("Guè Pequeno"), "guepequeno")
         self.assertEqual(YouTubeExtractor._compact("R.E.M."), "rem")
         self.assertEqual(YouTubeExtractor._compact("blink-182"), "blink182")
+
+    def test_tokens_fold_accents_and_keep_other_scripts(self):
+        self.assertEqual(YouTubeExtractor._tokens("Beyoncé"), ["beyonce"])
+        self.assertEqual(YouTubeExtractor._tokens("però"), ["pero"])
+        self.assertEqual(YouTubeExtractor._tokens("Måneskin"), ["maneskin"])
+        self.assertEqual(YouTubeExtractor._compact("Beyoncé"), "beyonce")
+        self.assertEqual(YouTubeExtractor._tokens("夜に駆ける"), ["夜に駆ける"])
+
+    def test_accented_track_matches_unaccented_uploads(self):
+        # Recorded query "Halo - Beyoncé": the unaccented VEVO uploads were
+        # rejected by the 1.2.4 gates (recall 0.5, artist gate false).
+        candidates = self.candidates(
+            "halo_unaccented_official",
+            name="Beyoncé - Halo",
+            artists=["Beyoncé"],
+            duration_ms=261000,
+        )
+        ids = [candidate.id for candidate in candidates]
+        self.assertEqual(candidates[0].id, "bnVUHWCynig")
+        for candidate_id in ("51IZ02KTQxY", "aIaarQuOJ5Q", "S6bJcnXBhbc"):
+            self.assertIn(candidate_id, ids)
+        self.assertTrue(YouTubeExtractor._is_official_channel("Beyonce VEVO", ["Beyoncé"]))
+
+    def test_accented_track_recall_and_artist_gate(self):
+        title = "Maneskin Zitti e Buoni Sanremo 2021 - Orchestrated and Conducted"
+        self.assertEqual(
+            YouTubeExtractor._title_recall(title, "Måneskin - Zitti e buoni"), 1.0
+        )
+        self.assertGreater(
+            YouTubeExtractor._artist_tier(title, "Melox", ["Måneskin"], False), 0.0
+        )
+
+    def test_multiword_artist_anchored_on_consecutive_tokens(self):
+        tranne = self.candidates("tranne_te_multiword")
+        ids = [candidate.id for candidate in tranne]
+        self.assertEqual(tranne[0].id, "VkE9YpbqJHI")
+        # Third-party uploads spelling the name out, capped at top N.
+        self.assertEqual(len(tranne), 10)
+        for candidate_id in ("6MNYzr596DA", "KSfnFjovqJ4", "Nbd3gBqHw9M"):
+            self.assertIn(candidate_id, ids)
+        blinding = self.candidates("blinding_lights_multiword")
+        self.assertEqual(blinding[0].id, "fHI8X4OXluQ")
+        self.assertIn("XwxLwG2_Sxk", [candidate.id for candidate in blinding])
+
+    def test_related_artist_tier(self):
+        self.assertEqual(
+            YouTubeExtractor._artist_tier(
+                "Have You Ever Seen the Rain",
+                "Creedence Clearwater Revival",
+                ["Creedence Clearwater Revisited"],
+                False,
+            ),
+            0.8,
+        )
+        self.assertEqual(
+            YouTubeExtractor._artist_tier(
+                "Sowing the Seeds of Love", "Radio X", ["Tears for Fears"], False
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            YouTubeExtractor._artist_tier(
+                "This Is the Day", "Radio X", ["The The"], False
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            YouTubeExtractor._artist_tier("UNA CHIAVE", "telecaparezza", ["Caparezza"], False),
+            0.9,
+        )
+
+    def test_sensitive_tracks_counts_and_first_candidate(self):
+        """Every sensitive track at once: count (top N) and first candidate."""
+        expected = {
+            "nelle_mani": (6, "j6Ztfikf6Ds"),
+            "un_mestiere_qualunque": (6, "BoR9aQ2pJxU"),
+            "qua_dentro": (1, "9VUD-W5nj5I"),
+            "cose_preziose": (10, "IRTbuEQXUpM"),
+            "serpi": (6, "7wSCDySZay8"),
+            "have_you_ever_seen_the_rain": (9, "bO28lB1uwp4"),
+            "una_chiave": (9, "orgycZTgvUQ"),
+            "ti_fa_stare_bene_core": (8, "84rgsCJOMUA"),
+            "everybody_hurts": (10, "5rOiW_xY-kc"),
+            "all_the_small_things": (10, "9Ht5RZpzPqw"),
+            "come_together": (10, "45cYwDMibGo"),
+            "back_in_black": (10, "pAgnJDJN4VA"),
+            "grande_amore": (10, "w1f6o1HQBvg"),
+            "with_or_without_you": (10, "6Q2mFw4VYBo"),
+            "breaking_me": (10, "jIoEaTN7GGo"),
+            "la_caduta_di_atlante_core": (5, "2xMotUsFsVY"),
+            "headlight": (0, None),
+            "bohemian_live_aid": (5, "vbvyNnw8Qjg"),
+            "tranne_te_multiword": (10, "VkE9YpbqJHI"),
+            "blinding_lights_multiword": (10, "fHI8X4OXluQ"),
+        }
+        for key, (count, first_id) in expected.items():
+            with self.subTest(track=key):
+                candidates = self.candidates(key)
+                self.assertEqual(len(candidates), count)
+                self.assertEqual(candidates[0].id if candidates else None, first_id)
+
+    def test_have_you_ever_seen_the_rain_scored(self):
+        candidates = self.candidates("have_you_ever_seen_the_rain")
+        ids = [candidate.id for candidate in candidates]
+        self.assertEqual(candidates[0].id, "bO28lB1uwp4")
+        # The studio CCR uploads win over the Revisited live recordings.
+        for candidate_id in ("bO28lB1uwp4", "oZael8uSAJo", "wUjT5Yt6TbU"):
+            self.assertIn(candidate_id, ids)
+        # A cover with the same title but a 28 s longer duration is dropped.
+        self.assertNotIn("2oX2FSv4Rys", ids)
 
     def test_una_chiave_relaxed_recovers_exact_upload(self):
         candidates = self.candidates("una_chiave")
@@ -501,7 +613,7 @@ class TestSearchGates(unittest.TestCase):
     def test_everybody_hurts_initials_artist_gate(self):
         candidates = self.candidates("everybody_hurts")
         self.assertTrue(candidates)
-        self.assertEqual(candidates[0].id, "mhIay4-PbCY")
+        self.assertEqual(candidates[0].id, "5rOiW_xY-kc")
         self.assertEqual(candidates[0].artist, "remhq")
 
     def test_all_the_small_things_official_first(self):
@@ -522,16 +634,17 @@ class TestSearchGates(unittest.TestCase):
         self.assertIn("hJskvsP--6o", ids)
         self.assertNotIn("kyLuzKbgXAs", ids)
 
-    def test_parenthetical_trigger_keeps_exact_and_drops_studio(self):
+    def test_parenthetical_title_is_not_diluted_by_studio(self):
         candidates = self.candidates(
             "bohemian_live_aid",
             name="Bohemian Rhapsody (Live Aid 1985)",
             duration_ms=165000,
         )
         ids = [candidate.id for candidate in candidates]
-        self.assertIn("vbvyNnw8Qjg", ids)
-        self.assertNotIn("fJ9rUzIMcZQ", ids)
-        self.assertNotIn("kM0Fpbz0W8U", ids)
+        # The exact Live Aid upload beats the official medley and the studio.
+        self.assertEqual(ids[0], "vbvyNnw8Qjg")
+        self.assertLess(ids.index("vbvyNnw8Qjg"), ids.index("keVH4_WdgmI"))
+        self.assertLess(ids.index("vbvyNnw8Qjg"), ids.index("fJ9rUzIMcZQ"))
 
     def test_attached_suffixes_are_official(self):
         self.assertTrue(YouTubeExtractor._is_official_channel("blink182VEVO", ["blink-182"]))
@@ -545,16 +658,23 @@ class TestSearchGates(unittest.TestCase):
         self.assertTrue(YouTubeExtractor._is_official_channel("Topic", ["Topic", "A7S"]))
 
     def test_single_word_of_multiword_name_does_not_pass(self):
-        self.assertFalse(
-            YouTubeExtractor._artist_ok(
+        self.assertEqual(
+            YouTubeExtractor._artist_tier(
                 "Sowing the Seeds of Love", "Radio X", ["Tears for Fears"], False
-            )
+            ),
+            0.0,
         )
-        self.assertFalse(
-            YouTubeExtractor._artist_ok("This Is the Day", "Radio X", ["The The"], False)
+        self.assertEqual(
+            YouTubeExtractor._artist_tier(
+                "This Is the Day", "Radio X", ["The The"], False
+            ),
+            0.0,
         )
-        self.assertTrue(
-            YouTubeExtractor._artist_ok("Everybody Hurts", "remhq", ["R.E.M."], False)
+        self.assertGreater(
+            YouTubeExtractor._artist_tier(
+                "Everybody Hurts", "remhq", ["R.E.M."], False
+            ),
+            0.0,
         )
 
     def test_beatles_official_first(self):
@@ -571,7 +691,7 @@ class TestSearchGates(unittest.TestCase):
 
     def test_u2_official_first(self):
         candidates = self.candidates("with_or_without_you")
-        self.assertEqual(candidates[0].id, "ujNeHIo7oTE")
+        self.assertEqual(candidates[0].id, "6Q2mFw4VYBo")
 
     def test_dj_topic_official_from_recorded_search(self):
         candidates = self.candidates("breaking_me")
@@ -628,14 +748,22 @@ class TestSearchGates(unittest.TestCase):
             "una_chiave": ("orgycZTgvUQ", 1),
             "ti_fa_stare_bene": ("84rgsCJOMUA", 2),
             "la_caduta_di_atlante": ("2xMotUsFsVY", 2),
-            "everybody_hurts": ("mhIay4-PbCY", 1),
+            "everybody_hurts": ("5rOiW_xY-kc", 1),
             "all_the_small_things": ("9Ht5RZpzPqw", 1),
             "headlight": (None, 1),
             "come_together": ("45cYwDMibGo", 1),
             "back_in_black": ("pAgnJDJN4VA", 1),
             "grande_amore": ("w1f6o1HQBvg", 1),
-            "with_or_without_you": ("ujNeHIo7oTE", 1),
-            "breaking_me": ("IiHDaFq1XEY", 1),
+            "with_or_without_you": ("6Q2mFw4VYBo", 1),
+            "breaking_me": ("jIoEaTN7GGo", 1),
+            "nelle_mani": ("j6Ztfikf6Ds", 1),
+            "un_mestiere_qualunque": ("BoR9aQ2pJxU", 1),
+            "qua_dentro": ("9VUD-W5nj5I", 2),
+            "cose_preziose": ("IRTbuEQXUpM", 1),
+            "serpi": ("7wSCDySZay8", 1),
+            "have_you_ever_seen_the_rain": ("bO28lB1uwp4", 1),
+            "tranne_te_multiword": ("VkE9YpbqJHI", 1),
+            "blinding_lights_multiword": ("fHI8X4OXluQ", 1),
         }
 
         mock_ydl = MagicMock()

@@ -1,6 +1,8 @@
 # Development tooling (never vendored into plugin.zip: only requirements.txt is).
 -r requirements.txt
 
+pytest>=8.0
+
 # Platform SDK pinned to the audio contract 2.0.0 revision (same as the host app and the
 # metadata plugin). Install order matters only for readability: each package depends on the
 # previous ones at import time, not at install time.

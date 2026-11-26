@@ -3,8 +3,8 @@
     "packageId": "musicare_audiosource_youtube_plugin",
     "type": "audioSource",
     "name": "YouTube Audio Source",
-    "version": "1.2.5",
-    "pluginSdkVersion": "1.0.0",
+    "version": "1.3.0",
+    "pluginSdkVersion": "2.0.0",
     "author": "MusicAre Team",
     "description": "High-performance YouTube Music audio streaming source powered by yt-dlp.",
     "repository": "https://github.com/stefare90/musicare_audiosource_youtube_plugin"

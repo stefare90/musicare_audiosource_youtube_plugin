@@ -1,5 +1,10 @@
 # Development tooling (never vendored into plugin.zip: only requirements.txt is).
 -r requirements.txt
 
-git+https://github.com/stefare90/musicare_plugin_sdk.git#subdirectory=python/audio/plugin_sdk
-git+https://github.com/stefare90/musicare_plugin_sdk.git#subdirectory=python/plugin_builder
+# Platform SDK pinned to the audio contract 2.0.0 revision (same as the host app and the
+# metadata plugin). Install order matters only for readability: each package depends on the
+# previous ones at import time, not at install time.
+git+https://github.com/stefare90/musicare_plugin_sdk.git@839a6ac#subdirectory=python/plugin_contract
+git+https://github.com/stefare90/musicare_plugin_sdk.git@839a6ac#subdirectory=python/plugin_auth
+git+https://github.com/stefare90/musicare_plugin_sdk.git@839a6ac#subdirectory=python/audio/plugin_sdk
+git+https://github.com/stefare90/musicare_plugin_sdk.git@839a6ac#subdirectory=python/plugin_builder

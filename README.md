@@ -12,6 +12,23 @@ MusicAre audio source plugins follow a decoupled, two-phase resolution lifecycle
 1. **Phase 1: Candidate Search (`search_candidates`)**: Fast text-based search returning lightweight metadata (`CandidateTrack`: id, title, artist, duration) in **< 0.4s** without extracting or parsing heavy audio formats.
 2. **Phase 2: JIT Stream Resolution (`resolve_stream`)**: Direct on-demand extraction of the playable CDN stream URL (`AudioStreamResponse`) in **~0.7s** executed exclusively for the single selected `candidate_id`.
 
+## 🔌 Contract & authentication
+
+This plugin targets the **audio plugin contract 2.0.0** (`pluginSdkVersion: "2.0.0"`, provided by
+`musicare_audio_plugin_sdk` 2.0.0). That revision makes authentication a facility **shared by every
+plugin type**: `auth_required` is the seventh code of the error vocabulary and
+`BaseAudioSourcePlugin.auth` is an *optional* property (`IAuth`, same interface as the metadata plugins).
+
+This plugin needs **no login** and therefore implements neither `IAuth` nor `auth_required`: the runtime
+answers `unsupported` to `auth.*` calls, and nothing in `src/errors.py` maps a yt-dlp failure to
+`auth_required`. Everything still travels through the plugin's own HTTP clients, with no cookies.
+
+A host serving the 2.0.0 contract rejects an archive declaring `1.0.0` (`^1.0.0` does not admit 2.0.0)
+and the app would be left without an audio source: the manifest and the installed SDK must move together
+(the anti-drift test in `test/unit_test.py` compares `pluginSdkVersion` with the installed SDK version).
+
+---
+
 ## 🔎 Search query construction
 
 `search_candidates` issues **at most 3** queries (`ytsearch15:`, first 15 hits
@@ -137,9 +154,9 @@ To ensure 100% dynamic, Over-The-Air (OTA) execution without triggering mobile O
 
 ```text
 musicare_audiosource_template/
-├── plugin.json               # Manifest metadata and SDK version constraint
+├── plugin.json               # Manifest metadata and SDK contract version
 ├── requirements.txt          # Runtime dependencies, vendored into plugin.zip (must be pure-Python)
-├── requirements-dev.txt      # Dev tooling only (platform SDK + builder), never shipped
+├── requirements-dev.txt      # Dev tooling only (SDK, auth contract, builder), never shipped
 ├── src/
 │   ├── __init__.py           # Package marker (loaded as a regular package by the host)
 │   ├── extractor.py          # Provider-specific search and stream URL extraction
@@ -177,7 +194,7 @@ source .venv/bin/activate
 
 # (Optional) On Windows: .venv\Scripts\activate
 
-# Install runtime dependencies and development tooling (platform SDK + builder)
+# Install runtime dependencies and development tooling (platform SDK, auth contract, builder)
 pip install -r requirements-dev.txt
 ```
 
@@ -197,7 +214,7 @@ Open `plugin.json` and customize your plugin identity:
   "type": "audioSource",
   "name": "My Provider Audio Source",
   "version": "1.0.0",
-  "pluginSdkVersion": "1.0.0",
+  "pluginSdkVersion": "2.0.0",
   "author": "Your Name / Team",
   "description": "MusicAre audio source plugin for My Provider.",
   "repository": "https://github.com/your_org/musicare_audiosource_myprovider_plugin"
@@ -287,12 +304,16 @@ musicare-audio-play "Pink Floyd" "Comfortably Numb"
 
 ### 4. Platform Harness (End-to-End)
 Certify the packaged `plugin.zip` against the real host runtime (Linux or an Android device).
-Include `http.range` to prove the resolved stream is actually playable:
+The harness reads the archive's own manifest and prints the plugin version it is exercising, so a
+stale `plugin.zip` is visible in the report before any assertion. Include `http.range` to prove the
+resolved stream is actually playable:
 ```bash
 ../musicare_plugin_sdk/dart/harness/test_audio_plugin.sh linux /abs/path/plugin.zip "<query>" \
   "searchCandidates,stream.resolve,http.range"
 ```
-The full procedure is documented in the [platform README](https://github.com/stefare90/musicare_plugin_sdk).
+The platform side must be on the same contract revision as the manifest: a host serving 2.0.0 refuses
+an archive declaring `pluginSdkVersion` 1.0.0. The full procedure is documented in the
+[platform README](https://github.com/stefare90/musicare_plugin_sdk).
 
 ---
 

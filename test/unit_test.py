@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from importlib.metadata import version as installed_version
 from unittest.mock import MagicMock, patch
 
 from musicare_audio_plugin_sdk import (
@@ -37,12 +38,22 @@ class TestYouTubePluginUnit(unittest.TestCase):
     def test_plugin_metadata(self):
         self.assertEqual(self.plugin.id, "org.musicare.audiosource.youtube")
         self.assertEqual(self.plugin.name, "YouTube Audio Source")
-        self.assertEqual(self.plugin.version, "1.2.5")
+        self.assertEqual(self.plugin.version, "1.3.0")
 
     def test_manifest_version_matches_plugin_version(self):
         manifest = os.path.join(os.path.dirname(__file__), "..", "plugin.json")
         with open(manifest, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["version"], self.plugin.version)
+
+    def test_manifest_declares_the_installed_sdk_contract(self):
+        manifest = os.path.join(os.path.dirname(__file__), "..", "plugin.json")
+        with open(manifest, encoding="utf-8") as fh:
+            declared = json.load(fh)["pluginSdkVersion"]
+        self.assertEqual(declared, installed_version("musicare-audio-plugin-sdk"))
+
+    def test_plugin_declares_no_auth(self):
+        with self.assertRaises(NotImplementedError):
+            self.plugin.auth
 
     @patch("src.extractor.yt_dlp.YoutubeDL")
     def test_search_candidates_parsing(self, mock_ydl_cls):
